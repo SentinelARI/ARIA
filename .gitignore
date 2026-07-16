@@ -1,0 +1,12 @@
+node_modules/
+.next/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+
+# Keep Markdown briefs and local instructions out of the repository.
+*.md
+!README.md
+!AGENTS.md

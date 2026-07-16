@@ -1,0 +1,9 @@
+{
+  "name": "aria-workspace",
+  "private": true,
+  "workspaces": ["frontend", "backend"],
+  "scripts": {
+    "test": "npm --workspace backend test",
+    "lint": "npm --workspace frontend run lint"
+  }
+}
