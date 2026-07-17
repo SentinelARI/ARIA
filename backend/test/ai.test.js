@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateAnalysisProgram, generateDefenseNarrative } from '../src/ai.js';
+import { generateAnalysisProgram, generateDefenseNarrative, streamDefenseNarrative } from '../src/ai.js';
 import { createSyntheticEvents } from '../src/data.js';
 
 function fakeClient(outputs) {
@@ -34,4 +34,27 @@ test('defense agent requests a fresh narrative for each re-derived evidence payl
   assert.notEqual(first, second);
   assert.match(client.requests[0].instructions, /plain-language/);
   assert.match(client.requests[0].input, /expectedCadence/);
+});
+
+test('defense agent streams narrative deltas through the Responses API', async () => {
+  const requests = [];
+  const client = {
+    requests,
+    responses: {
+      create: async (request) => {
+        requests.push(request);
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.output_text.delta', delta: 'Amara’s order is later. ' };
+            yield { type: 'response.output_text.delta', delta: 'A check-in is timely.' };
+          }
+        };
+      }
+    }
+  };
+  const context = { insight: { title: 'Amara may be drifting away' }, evidence: { latestGap: 19, expectedCadence: 12 }, model: 'test-model', client };
+  const deltas = [];
+  for await (const delta of streamDefenseNarrative(context)) deltas.push(delta);
+  assert.deepEqual(deltas, ['Amara’s order is later. ', 'A check-in is timely.']);
+  assert.equal(client.requests[0].stream, true);
 });

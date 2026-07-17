@@ -1,71 +1,141 @@
 import cors from 'cors';
 import express from 'express';
-import { createSyntheticEvents, demoMerchant } from './data.js';
-import { createMorningBrief, rederiveDefenseEvidence, summarizePrioritization } from './agents.js';
-import { generateAnalysisProgram, generateDefenseNarrative } from './ai.js';
+import { pathToFileURL } from 'node:url';
+import { createSyntheticMerchantData, demoMerchants } from './data.js';
+import { createMorningBrief, createTrustLedger, rederiveDefenseEvidence, summarizePrioritization } from './agents.js';
+import { generateAnalysisProgram, generateDefenseNarrative, streamDefenseNarrative } from './ai.js';
 import { executeInSandbox } from './sandbox.js';
 
-const app = express();
-const events = createSyntheticEvents();
-const analysisRequests = new Map();
-const metrics = { briefRequests: 0, defenseRequests: 0, analysisRequests: 0, analysisFailures: 0 };
 const allowedOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim()).filter(Boolean);
+const businessTerms = /\b(sale|sales|customer|customers|client|clients|order|orders|inventory|stock|supplier|suppliers|price|prices|pricing|purchase|purchases|revenue|payment|payments|product|products|buyer|buyers)\b/i;
+const unsafeQuestionPattern = /(?:ignore|disregard).{0,80}(?:instruction|rule)|(?:api|secret|access)\s*key|system\s+prompt/i;
 
-function analysisRateLimit(request, response, next) {
-  const now = Date.now();
-  const key = request.ip ?? 'unknown';
-  const windowMs = 60_000;
-  const maximumRequests = 10;
-  const entry = analysisRequests.get(key);
-  const current = !entry || now - entry.startedAt >= windowMs ? { startedAt: now, count: 0 } : entry;
-  current.count += 1;
-  analysisRequests.set(key, current);
-  response.set('RateLimit-Limit', String(maximumRequests));
-  response.set('RateLimit-Remaining', String(Math.max(0, maximumRequests - current.count)));
-  if (current.count > maximumRequests) return response.status(429).json({ error: 'Please wait a minute before running more analyses.' });
-  return next();
+function resolveMerchant(merchantData, merchantId) {
+  const dataset = merchantData.get(merchantId ?? demoMerchants[0].id);
+  if (!dataset) throw new Error('Merchant not found.');
+  return dataset;
 }
 
-app.disable('x-powered-by');
-app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : process.env.NODE_ENV === 'production' ? false : true, methods: ['GET', 'POST'], maxAge: 86_400 }));
-app.use(express.json({ limit: '8kb', strict: true }));
+function validateQuestion(question) {
+  if (typeof question !== 'string' || question.trim().length < 3 || question.length > 300) throw new Error('Ask a business question between 3 and 300 characters.');
+  const normalizedQuestion = question.trim();
+  if (unsafeQuestionPattern.test(normalizedQuestion)) throw new Error('ARIA cannot access secrets or follow instruction-like requests. Ask about the merchant’s sales, customers, stock, prices, or suppliers.');
+  if (!businessTerms.test(normalizedQuestion)) throw new Error('ARIA only analyzes this merchant’s sales, customers, stock, prices, and suppliers—not general knowledge.');
+  return normalizedQuestion;
+}
 
-app.get('/health', (_request, response) => response.json({ status: 'ok', sandboxImage: 'aria-analysis-sandbox:latest' }));
-app.get('/api/brief', (_request, response) => {
-  metrics.briefRequests += 1;
-  return response.json({ merchant: demoMerchant, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events) });
-});
-app.post('/api/defense', async (request, response) => {
-  try {
-    if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
-    metrics.defenseRequests += 1;
-    const defense = rederiveDefenseEvidence(events, request.body.insightId);
-    const narrative = await generateDefenseNarrative(defense);
-    return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
-  } catch (error) {
-    const status = error.message === 'Insight not found in the current signal set.' ? 404 : 503;
-    return response.status(status).json({ error: error.message });
+function sendEvent(response, event, payload) {
+  response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function messageFor(error) {
+  return error instanceof Error ? error.message : 'ARIA could not complete that request.';
+}
+
+export function createApp({ merchantData = createSyntheticMerchantData(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, rateLimitMaximum = 10 } = {}) {
+  const app = express();
+  const analysisRequests = new Map();
+  const metrics = { briefRequests: 0, defenseRequests: 0, analysisRequests: 0, analysisFailures: 0 };
+
+  function analysisRateLimit(request, response, next) {
+    const now = Date.now();
+    const key = request.ip ?? 'unknown';
+    const windowMs = 60_000;
+    const entry = analysisRequests.get(key);
+    const current = !entry || now - entry.startedAt >= windowMs ? { startedAt: now, count: 0 } : entry;
+    current.count += 1;
+    analysisRequests.set(key, current);
+    response.set('RateLimit-Limit', String(rateLimitMaximum));
+    response.set('RateLimit-Remaining', String(Math.max(0, rateLimitMaximum - current.count)));
+    if (current.count > rateLimitMaximum) return response.status(429).json({ error: 'Please wait a minute before running more analyses.' });
+    return next();
   }
-});
-app.post('/api/analysis', analysisRateLimit, async (request, response) => {
-  try {
-    const question = request.body?.question;
-    if (typeof question !== 'string' || question.trim().length < 3 || question.length > 300) return response.status(400).json({ error: 'Ask a short question about sales or customers.' });
-    metrics.analysisRequests += 1;
-    const code = await generateAnalysisProgram({ question, events });
-    const result = await executeInSandbox(code);
-    return response.json({ result, generatedCode: code });
-  } catch (error) {
-    metrics.analysisFailures += 1;
-    return response.status(422).json({ error: error.message });
-  }
-});
-app.get('/api/metrics', (_request, response) => response.json({ ...metrics, prioritySummary: summarizePrioritization(events) }));
 
-app.use((error, _request, response, _next) => {
-  if (error instanceof SyntaxError && 'body' in error) return response.status(400).json({ error: 'Send valid JSON.' });
-  return response.status(500).json({ error: 'ARIA could not complete that request.' });
-});
+  app.disable('x-powered-by');
+  app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : process.env.NODE_ENV === 'production' ? false : true, methods: ['GET', 'POST'], maxAge: 86_400 }));
+  app.use(express.json({ limit: '8kb', strict: true }));
 
-const port = Number(process.env.PORT ?? 4000);
-app.listen(port, () => console.log(`ARIA API listening on ${port}`));
+  app.get('/health', (_request, response) => response.json({ status: 'ok', sandbox: 'isolated-vm' }));
+  app.get('/api/merchants', (_request, response) => response.json({ merchants: demoMerchants }));
+  app.get('/api/brief', (request, response) => {
+    try {
+      const { merchant, events } = resolveMerchant(merchantData, request.query.merchant);
+      metrics.briefRequests += 1;
+      return response.json({ merchant, merchants: demoMerchants, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events), ledger: createTrustLedger(events) });
+    } catch (error) {
+      return response.status(404).json({ error: messageFor(error) });
+    }
+  });
+  app.post('/api/defense', async (request, response) => {
+    try {
+      if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
+      const { events } = resolveMerchant(merchantData, request.body.merchantId);
+      metrics.defenseRequests += 1;
+      const defense = rederiveDefenseEvidence(events, request.body.insightId);
+      const narrative = await defenseNarrative(defense);
+      return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
+    } catch (error) {
+      const message = messageFor(error);
+      const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : 503;
+      return response.status(status).json({ error: message });
+    }
+  });
+  app.post('/api/defense/stream', async (request, response) => {
+    try {
+      if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
+      const { events } = resolveMerchant(merchantData, request.body.merchantId);
+      const defense = rederiveDefenseEvidence(events, request.body.insightId);
+      const controller = new AbortController();
+      request.on('aborted', () => controller.abort());
+      metrics.defenseRequests += 1;
+      response.status(200).set({
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      response.flushHeaders();
+      sendEvent(response, 'meta', { insightId: defense.insightId, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
+      for await (const delta of defenseStream({ ...defense, signal: controller.signal })) sendEvent(response, 'delta', { delta });
+      sendEvent(response, 'done', { confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
+      return response.end();
+    } catch (error) {
+      if (!response.headersSent) {
+        const message = messageFor(error);
+        const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : 503;
+        return response.status(status).json({ error: message });
+      }
+      sendEvent(response, 'error', { error: messageFor(error) });
+      return response.end();
+    }
+  });
+  app.post('/api/analysis', analysisRateLimit, async (request, response) => {
+    try {
+      const question = validateQuestion(request.body?.question);
+      const { events } = resolveMerchant(merchantData, request.body?.merchantId);
+      metrics.analysisRequests += 1;
+      const code = await analysisProgram({ question, events });
+      const result = await sandbox(code);
+      return response.json({ result, generatedCode: code });
+    } catch (error) {
+      metrics.analysisFailures += 1;
+      const message = messageFor(error);
+      const status = message.startsWith('Ask a business') || message.startsWith('ARIA cannot') || message.startsWith('ARIA only') ? 400 : message === 'Merchant not found.' ? 404 : 422;
+      return response.status(status).json({ error: message });
+    }
+  });
+  app.get('/api/metrics', (_request, response) => response.json({ ...metrics }));
+
+  app.use((error, _request, response, _next) => {
+    if (error instanceof SyntaxError && 'body' in error) return response.status(400).json({ error: 'Send valid JSON.' });
+    return response.status(500).json({ error: 'ARIA could not complete that request.' });
+  });
+  return app;
+}
+
+export const app = createApp();
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const port = Number(process.env.PORT ?? 4000);
+  app.listen(port, () => console.log(`ARIA API listening on ${port}`));
+}

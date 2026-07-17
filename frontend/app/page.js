@@ -1,40 +1,45 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+
+const fallbackMerchants = [
+  { id: 'aisha-textiles', name: 'Aisha', business: 'Aisha Textiles', location: 'Yaba, Lagos', sector: 'Fabric retail' },
+  { id: 'kola-mobile', name: 'Kola', business: 'Kola Mobile Accessories', location: 'Computer Village, Lagos', sector: 'Phone accessories' }
+];
 
 const fallbackActions = [
   {
     id: 'churn-cust-amara',
     kind: 'churn-risk',
     title: 'Amara Okafor may be drifting away',
-    action: 'Send Amara a personal check-in and show the new Ankara arrivals.',
-    draftMessage: 'Hi Amara, we just received fresh Ankara patterns I think you would like. Should I send you a quick video before they go?',
+    action: 'Send Amara a personal check-in and show the latest Ankara arrivals.',
+    draftMessage: 'Hi Amara, we just received fresh Ankara options I think you would like. Should I send you a quick video before they go?',
     confidence: 86,
     priorityScore: 95
   },
   {
-    id: 'inventory-follow-up',
-    kind: 'inventory',
-    title: 'Turn yesterday’s Ankara restock into sales',
-    action: 'Share a short arrivals video with your repeat Ankara buyers before the weekend.',
-    draftMessage: 'New Ankara just landed today. I saved the patterns that match what you normally pick — would you like a quick video?',
-    confidence: 79,
-    priorityScore: 91
+    id: 'pricing-cust-ijeoma-lace-fabric',
+    kind: 'pricing-anomaly',
+    title: 'Review Ijeoma’s lace fabric price',
+    action: 'Check whether Ijeoma’s repeat lace fabric price is still intentional before the next order.',
+    draftMessage: 'Hi Ijeoma, I am reviewing our current lace fabric prices before your next order. Should I reserve your usual quantity while I confirm the best option?',
+    confidence: 82,
+    priorityScore: 85
   },
   {
-    id: 'weekend-bundles',
-    kind: 'sales-opportunity',
-    title: 'Create a weekend Ankara bundle offer',
-    action: 'Bundle three slow-moving Ankara patterns and send the offer to customers who bought prints this month.',
-    draftMessage: 'I put together a weekend Ankara bundle with three fresh patterns at a better price. Would you like me to reserve one for you?',
-    confidence: 74,
-    priorityScore: 82
+    id: 'inventory-follow-up-transaction-1',
+    kind: 'inventory',
+    title: 'Turn yesterday’s Ankara restock into sales',
+    action: 'Share a short arrivals update with repeat Ankara buyers before the weekend.',
+    draftMessage: 'New Ankara stock just landed. I saved options that match what you normally pick — would you like a quick video?',
+    confidence: 79,
+    priorityScore: 87
   }
 ];
 
-const fallbackSummary = { signalsRead: 25, opportunitiesEvaluated: 4, actionsSurfaced: 3, opportunitiesDiscarded: 1 };
+const fallbackSummary = { signalsRead: 0, opportunitiesEvaluated: 0, actionsSurfaced: 3, opportunitiesDiscarded: 0 };
 
 function Icon({ name, size = 20 }) {
   const paths = {
@@ -47,17 +52,82 @@ function Icon({ name, size = 20 }) {
     volume: <><path d="M4 10v4h3l4 3V7l-4 3H4Z" /><path d="M15 9.5a4 4 0 0 1 0 5M17.5 7a7.2 7.2 0 0 1 0 10" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     terminal: <><path d="m5 7 4 4-4 4M12 17h7" /></>,
-    chart: <><path d="M4 19V5M4 19h16" /><path d="m7 15 3-4 3 2 5-7" /></>
+    chart: <><path d="M4 19V5M4 19h16" /><path d="m7 15 3-4 3 2 5-7" /></>,
+    building: <><path d="M4 21V4h11v17M15 9h5v12" /><path d="M7 8h4M7 12h4M7 16h4M17 13h1M17 17h1" /></>
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
 function typeLabel(kind) {
-  return kind === 'churn-risk' ? 'Customer signal' : kind === 'inventory' ? 'Inventory window' : 'Sales opportunity';
+  const labels = {
+    'churn-risk': 'Customer signal',
+    'pricing-anomaly': 'Pricing signal',
+    'supplier-delay': 'Supplier signal',
+    inventory: 'Inventory window',
+    'sales-opportunity': 'Sales opportunity'
+  };
+  return labels[kind] ?? 'Business signal';
+}
+
+function formatLedgerDate(date) {
+  return new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short', timeZone: 'Africa/Lagos' }).format(new Date(date));
+}
+
+function responseError(payload) {
+  return payload?.error ?? 'ARIA could not complete that request.';
+}
+
+function parseSseMessage(message) {
+  const lines = message.split('\n');
+  const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? 'message';
+  const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
+  return { event, payload: JSON.parse(data) };
+}
+
+async function consumeSse(response, onEvent) {
+  if (!response.body) throw new Error('ARIA could not open the live reasoning stream.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replaceAll('\r\n', '\n');
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary >= 0) {
+      const message = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      if (message.trim()) onEvent(parseSseMessage(message));
+      boundary = buffer.indexOf('\n\n');
+    }
+    if (done) return;
+  }
+}
+
+function useCountUp(value) {
+  const [displayValue, setDisplayValue] = useState(0);
+  const previousValue = useRef(0);
+  useEffect(() => {
+    const startValue = previousValue.current;
+    previousValue.current = value;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setDisplayValue(value);
+      return undefined;
+    }
+    const startedAt = performance.now();
+    let frame;
+    const update = (now) => {
+      const progress = Math.min(1, (now - startedAt) / 420);
+      setDisplayValue(Math.round(startValue + (value - startValue) * (1 - (1 - progress) ** 3)));
+      if (progress < 1) frame = requestAnimationFrame(update);
+    };
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [value]);
+  return displayValue;
 }
 
 function Sparkline() {
-  return <div className="sparkline" role="img" aria-label="Amara’s order pattern was regular before her most recent smaller order and longer gap.">
+  return <div className="sparkline" role="img" aria-label="The customer’s order pattern was regular before the most recent smaller order and longer gap.">
     <svg viewBox="0 0 180 44" aria-hidden="true"><path className="spark-base" d="M2 34H178" /><path className="spark-path" d="M4 16 L30 15 L56 17 L82 14 L108 16 L134 15 L160 34 L176 37" /><circle cx="160" cy="34" r="4" className="spark-point" /></svg>
     <span>Order rhythm changed</span>
   </div>;
@@ -65,13 +135,17 @@ function Sparkline() {
 
 function AgentFlow({ active }) {
   const agents = [['Ingestion', 'Ingestion Agent'], ['Analysis', 'Codex Analysis'], ['Reasoning', 'Reasoning Agent'], ['Priority', 'Priority Agent'], ['Defense', 'Defense Agent']];
-  return <section className="control-room" aria-labelledby="control-title"><div><p className="eyebrow">CONTROL ROOM</p><h2 id="control-title">ARIA is a live decision system</h2><p>Each answer starts with structured synthetic events. Priority discards noise; Defense re-checks the evidence on request.</p></div><ol className="agent-flow">{agents.map(([id, label], index) => <li key={id} className={active === id ? 'active' : ''}><span>{String(index + 1).padStart(2, '0')}</span>{label}</li>)}</ol></section>;
+  return <section className="control-room" aria-labelledby="control-title"><div><p className="eyebrow">CONTROL ROOM</p><h2 id="control-title">ARIA is a live decision system</h2><p>Each answer starts with structured synthetic events. Priority discards noise; Defense re-checks evidence on every request.</p></div><ol className="agent-flow">{agents.map(([id, label], index) => <li key={id} className={active === id ? 'active' : ''}><span>{String(index + 1).padStart(2, '0')}</span>{label}</li>)}</ol></section>;
 }
 
 export default function Home() {
   const [actions, setActions] = useState(fallbackActions);
-  const [merchant, setMerchant] = useState({ name: 'Aisha', business: 'Aisha Textiles', location: 'Yaba, Lagos' });
+  const [merchant, setMerchant] = useState(fallbackMerchants[0]);
+  const [merchants, setMerchants] = useState(fallbackMerchants);
+  const [merchantId, setMerchantId] = useState(fallbackMerchants[0].id);
   const [summary, setSummary] = useState(fallbackSummary);
+  const [ledger, setLedger] = useState([]);
+  const [briefLoading, setBriefLoading] = useState(true);
   const [expandedId, setExpandedId] = useState(null);
   const [defenses, setDefenses] = useState({});
   const [defenseLoading, setDefenseLoading] = useState(null);
@@ -83,7 +157,9 @@ export default function Home() {
   const [theme, setTheme] = useState('light');
   const [pidgin, setPidgin] = useState(false);
   const [activeAgent, setActiveAgent] = useState('Priority');
+  const defenseController = useRef(null);
   const now = useMemo(() => new Date(), []);
+  const animatedDiscardCount = useCountUp(summary.opportunitiesDiscarded);
   const lagosWeekday = new Intl.DateTimeFormat('en-GB', { weekday: 'long', timeZone: 'Africa/Lagos' }).format(now).toUpperCase();
   const lagosHour = Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: 'Africa/Lagos' }).format(now));
   const greeting = lagosHour < 12 ? 'Morning' : lagosHour < 17 ? 'Afternoon' : 'Evening';
@@ -91,11 +167,6 @@ export default function Home() {
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('aria-theme');
     if (savedTheme === 'dark') setTheme('dark');
-    fetch(`${apiUrl}/api/brief`).then((response) => response.ok ? response.json() : Promise.reject()).then((brief) => {
-      setActions(brief.actions);
-      setMerchant(brief.merchant);
-      setSummary(brief.prioritySummary);
-    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -104,45 +175,120 @@ export default function Home() {
   }, [theme]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    setBriefLoading(true);
+    setActiveAgent('Ingestion');
+    fetch(`${apiUrl}/api/brief?merchant=${encodeURIComponent(merchantId)}`, { signal: controller.signal })
+      .then(async (response) => response.ok ? response.json() : Promise.reject(new Error(responseError(await response.json()))) )
+      .then((brief) => {
+        setActions(brief.actions);
+        setMerchant(brief.merchant);
+        setMerchants(brief.merchants);
+        setSummary(brief.prioritySummary);
+        setLedger(brief.ledger);
+        setActiveAgent('Priority');
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setActiveAgent('Priority');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setBriefLoading(false);
+      });
+    return () => controller.abort();
+  }, [merchantId]);
+
+  useEffect(() => {
     if (!draftNotice) return undefined;
     const timeout = window.setTimeout(() => setDraftNotice(null), 5000);
     return () => window.clearTimeout(timeout);
   }, [draftNotice]);
 
+  useEffect(() => () => defenseController.current?.abort(), []);
+
+  function clearDefense(insightId) {
+    defenseController.current?.abort();
+    defenseController.current = null;
+    setExpandedId(null);
+    setDefenseLoading(null);
+    setDefenses((current) => {
+      const { [insightId]: _discarded, ...remaining } = current;
+      return remaining;
+    });
+  }
+
   async function askWhy(action) {
-    const isOpen = expandedId === action.id;
-    setExpandedId(isOpen ? null : action.id);
-    if (isOpen || defenses[action.id]) return;
+    if (expandedId === action.id) {
+      clearDefense(action.id);
+      return;
+    }
+    defenseController.current?.abort();
+    const controller = new AbortController();
+    defenseController.current = controller;
+    setExpandedId(action.id);
     setDefenseLoading(action.id);
+    setDefenses({ [action.id]: { narrative: '', confidence: action.confidence } });
     setActiveAgent('Defense');
     try {
-      const response = await fetch(`${apiUrl}/api/defense`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ insightId: action.id }) });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error);
-      setDefenses((current) => ({ ...current, [action.id]: payload }));
-    } catch {
-      setDefenses((current) => ({ ...current, [action.id]: { narrative: 'ARIA needs the live signal service to re-check this action. Start the API, then try again.', confidence: action.confidence } }));
+      const response = await fetch(`${apiUrl}/api/defense/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ merchantId, insightId: action.id }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(responseError(await response.json()));
+      await consumeSse(response, ({ event, payload }) => {
+        if (event === 'meta' || event === 'done') {
+          setDefenses((current) => ({ ...current, [action.id]: { ...current[action.id], confidence: payload.confidence, recalculatedAt: payload.recalculatedAt } }));
+        }
+        if (event === 'delta') {
+          setDefenseLoading(null);
+          setDefenses((current) => ({ ...current, [action.id]: { ...current[action.id], narrative: `${current[action.id]?.narrative ?? ''}${payload.delta}` } }));
+        }
+        if (event === 'error') throw new Error(responseError(payload));
+      });
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      setDefenses({ [action.id]: { narrative: error.message, confidence: action.confidence, error: true } });
     } finally {
-      setDefenseLoading(null);
+      if (defenseController.current === controller) {
+        defenseController.current = null;
+        setDefenseLoading(null);
+      }
     }
   }
 
   async function runAnalysis(event) {
     event.preventDefault();
-    if (!question.trim()) return;
+    if (!question.trim()) {
+      setAnalysis({ error: 'Ask a business question before running analysis.' });
+      return;
+    }
     setAnalysisLoading(true);
     setAnalysis(null);
     setActiveAgent('Analysis');
     try {
-      const response = await fetch(`${apiUrl}/api/analysis`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }) });
+      const response = await fetch(`${apiUrl}/api/analysis`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merchantId, question }) });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error);
+      if (!response.ok) throw new Error(responseError(payload));
       setAnalysis({ question, result: payload.result, generatedCode: payload.generatedCode });
     } catch (error) {
       setAnalysis({ question, error: error.message });
     } finally {
       setAnalysisLoading(false);
     }
+  }
+
+  function selectMerchant(nextMerchantId) {
+    if (nextMerchantId === merchantId) return;
+    defenseController.current?.abort();
+    defenseController.current = null;
+    setMerchantId(nextMerchantId);
+    setExpandedId(null);
+    setDefenses({});
+    setDefenseLoading(null);
+    setAnalysis(null);
+    setSentActionId(null);
+    setDraftNotice(null);
   }
 
   function useDraft(action) {
@@ -169,30 +315,31 @@ export default function Home() {
     subhead: 'Here’s what matters today.',
     brief: 'Your next best moves',
     question: 'Ask ARIA a new business question',
-    helper: 'Ask about sales this week or which customers have gone quiet.'
+    helper: 'Ask about sales, customers, stock, prices, or suppliers.'
   };
 
   return <><a className="skip-link" href="#morning-brief">Skip to your Morning Brief</a><main>
     <section className="hero">
-      <nav className="nav" aria-label="Application controls"><div className="brand"><span className="brand-mark"><Icon name="spark" size={18} /></span><span>ARIA</span></div><div className="nav-controls"><span className="live"><i /> Watching your business</span><button className="icon-button" onClick={() => setPidgin((value) => !value)} aria-pressed={pidgin}>{pidgin ? 'EN' : 'PG'}</button><button className="icon-button" onClick={() => setTheme((value) => value === 'light' ? 'dark' : 'light')} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}><Icon name={theme === 'light' ? 'moon' : 'sun'} size={18} /></button></div></nav>
+      <nav className="nav" aria-label="Application controls"><div className="brand"><span className="brand-mark"><Icon name="spark" size={18} /></span><span>ARIA</span></div><div className="nav-controls"><span className="live"><i /> Watching synthetic signals</span><button className="icon-button" onClick={() => setPidgin((value) => !value)} aria-label={`Switch to ${pidgin ? 'English' : 'Pidgin'} copy`} aria-pressed={pidgin}>{pidgin ? 'EN' : 'PG'}</button><button className="icon-button" onClick={() => setTheme((value) => value === 'light' ? 'dark' : 'light')} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}><Icon name={theme === 'light' ? 'moon' : 'sun'} size={18} /></button></div></nav>
       <div className="hero-copy"><p className="eyebrow">{lagosWeekday} · {merchant.location?.toUpperCase()}</p><h1>{copy.greeting}<br /><em>{copy.subhead}</em></h1><p>ARIA reads the signals from {merchant.business}, then keeps only the actions worth a merchant’s time.</p></div>
-      <div className="signal-strip"><span><Icon name="shield" size={17} /> {summary.actionsSurfaced} actions surfaced</span><span>{summary.signalsRead} synthetic signals read · {summary.opportunitiesDiscarded} opportunity quietly discarded</span><button onClick={speakBrief}><Icon name="volume" size={17} /> Listen to brief</button></div>
+      <div className="merchant-switcher" role="group" aria-label="Choose a synthetic demo merchant"><span><Icon name="building" size={16} /> Demo merchant</span>{merchants.map((option) => <button key={option.id} type="button" className={option.id === merchantId ? 'selected' : ''} onClick={() => selectMerchant(option.id)} aria-pressed={option.id === merchantId}>{option.business}</button>)}</div>
+      <div className="signal-strip" aria-busy={briefLoading}><span><Icon name="shield" size={17} /> {summary.actionsSurfaced} actions surfaced</span><span>{summary.signalsRead} synthetic signals read · <strong aria-label={`${summary.opportunitiesDiscarded} opportunities quietly discarded`}>{animatedDiscardCount}</strong> opportunity quietly discarded</span><button onClick={speakBrief}><Icon name="volume" size={17} /> Listen to brief</button></div>
     </section>
 
     <section className="brief" id="morning-brief" aria-labelledby="brief-title"><div className="section-heading"><div><p className="eyebrow">MORNING BRIEF</p><h2 id="brief-title">{copy.brief}</h2></div><p className="quiet">No hidden queue. Unhelpful opportunities are discarded.</p></div>
       <div className="action-list">{actions.map((action, index) => {
         const defense = defenses[action.id];
         const expanded = expandedId === action.id;
-        return <article className={`action-card ${expanded ? 'expanded' : ''}`} key={action.id}><div className="rank">0{index + 1}</div><div className="action-content"><p className="type">{typeLabel(action.kind)} <span>·</span> {action.confidence}% confidence</p><h3>{action.title}</h3><p className="action-text">{action.action}</p>{action.kind === 'churn-risk' && <Sparkline />}<div className="action-buttons"><button className={`primary ${sentActionId === action.id ? 'confirmed' : ''}`} onClick={() => useDraft(action)}>{sentActionId === action.id ? <><Icon name="check" size={17} /> Draft ready</> : <><Icon name="message" size={17} /> Use draft <Icon name="arrow" size={16} /></>}</button><button className="secondary" onClick={() => askWhy(action)} aria-expanded={expanded}>{expanded ? 'Hide reasoning' : 'Why did ARIA pick this?'}</button></div>{expanded && <section className="defense" aria-live="polite"><p className="eyebrow">LIVE RE-DERIVATION</p>{defenseLoading === action.id ? <p className="thinking" role="status"><span /><span /><span /> ARIA is re-checking the signals</p> : <><p>{defense?.narrative}</p><div className="confidence"><span>Calculated from current structured events</span><strong>{defense?.confidence ?? action.confidence}% confidence</strong></div></>}</section>}</div><div className="score" aria-label={`Priority score ${action.priorityScore}`}><strong>{action.priorityScore}</strong><span>priority</span></div></article>;
+        return <article className={`action-card ${expanded ? 'expanded' : ''}`} style={{ '--enter-index': index }} key={action.id}><div className="rank">0{index + 1}</div><div className="action-content"><p className="type">{typeLabel(action.kind)} <span>·</span> {action.confidence}% confidence</p><h3>{action.title}</h3><p className="action-text">{action.action}</p>{action.kind === 'churn-risk' && <Sparkline />}<div className="action-buttons"><button className={`primary ${sentActionId === action.id ? 'confirmed' : ''}`} onClick={() => useDraft(action)}>{sentActionId === action.id ? <><Icon name="check" size={17} /> Draft ready</> : <><Icon name="message" size={17} /> Use draft <Icon name="arrow" size={16} /></>}</button><button className="secondary" onClick={() => askWhy(action)} aria-expanded={expanded}>{expanded ? 'Hide reasoning' : 'Why did ARIA pick this?'}</button></div><div className={`defense-region ${expanded ? 'expanded' : ''}`} aria-live="polite">{expanded && <section className="defense" aria-busy={defenseLoading === action.id}><p className="eyebrow">LIVE RE-DERIVATION · STREAMING</p>{defenseLoading === action.id && !defense?.narrative ? <p className="thinking" role="status"><span /><span /><span /> ARIA is re-checking current signals</p> : <><p className={defense?.error ? 'defense-error' : ''}>{defense?.narrative}</p><div className="confidence"><span>Calculated from current structured events</span><strong>{defense?.confidence ?? action.confidence}% confidence</strong></div></>}</section>}</div></div><div className="score" aria-label={`Priority score ${action.priorityScore}`}><strong>{action.priorityScore}</strong><span>priority</span></div></article>;
       })}</div>
     </section>
 
-    <section className="analysis" aria-labelledby="analysis-title"><div><p className="eyebrow">CODEX ANALYSIS AGENT</p><h2 id="analysis-title">{copy.question}</h2><p>ARIA creates a small program from structured event data and executes it inside a locked-down, no-network Docker sandbox.</p></div><form onSubmit={runAnalysis} className="analysis-form"><label htmlFor="analysis-question">Business question</label><div className="question-row"><input id="analysis-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. Which customers have gone quiet?" maxLength="300" disabled={analysisLoading} /><button className="primary" type="submit" disabled={analysisLoading}>{analysisLoading ? 'Running safely…' : 'Run analysis'} <Icon name="arrow" size={16} /></button></div><p className="helper">{copy.helper}</p></form>{analysis && <div className="analysis-result" aria-live="polite">{analysis.error ? <><strong>Analysis needs a different question.</strong><p>{analysis.error}</p></> : <><div className="result-heading"><span><Icon name="terminal" size={17} /> Fresh sandbox run</span><span>Network off · 128 MB · 5 seconds</span></div><pre>{analysis.generatedCode}</pre><div className="result-output"><strong>Result</strong><code>{JSON.stringify(analysis.result, null, 2)}</code></div></>}</div>}</section>
+    <section className="analysis" aria-labelledby="analysis-title"><div><p className="eyebrow">CODEX ANALYSIS AGENT</p><h2 id="analysis-title">{copy.question}</h2><p>ARIA creates a small program from structured event data and executes it inside a capability-free V8 isolate.</p></div><form onSubmit={runAnalysis} className="analysis-form"><label htmlFor="analysis-question">Business question</label><div className="question-row"><input id="analysis-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. Which customers have gone quiet?" maxLength="300" aria-describedby={analysis?.error ? 'analysis-helper analysis-error' : 'analysis-helper'} disabled={analysisLoading} /><button className="primary" type="submit" disabled={analysisLoading}>{analysisLoading ? 'Running safely…' : 'Run analysis'} <Icon name="arrow" size={16} /></button></div><p className="helper" id="analysis-helper">{copy.helper}</p>{analysis?.error && <p className="form-error" id="analysis-error" role="alert">{analysis.error}</p>}</form>{analysis && <div className="analysis-result" aria-live="polite">{analysis.error ? <><strong>Analysis needs a different question.</strong><p>{analysis.error}</p></> : <><div className="result-heading"><span><Icon name="terminal" size={17} /> Fresh sandbox run</span><span>No host capabilities · 128 MB · 5 seconds</span></div><pre>{analysis.generatedCode}</pre><div className="result-output"><strong>Result</strong><code>{JSON.stringify(analysis.result, null, 2)}</code></div></>}</div>}</section>
 
     <AgentFlow active={activeAgent} />
 
-    <section className="trust" aria-labelledby="trust-title"><div><p className="eyebrow">TRUST LEDGER</p><h2 id="trust-title">What ARIA helped Aisha notice</h2><p>Demo history is synthetic. ARIA suggests a draft; it never messages customers or makes financial decisions without the merchant.</p></div><div className="ledger" role="list"><div role="listitem"><span>10 Jul</span><strong>Amara check-in surfaced</strong><small>Awaiting Aisha’s approval</small></div><div role="listitem"><span>12 Jul</span><strong>Adire restock shared</strong><small>Merchant approved the drafted message</small></div><div role="listitem"><span>14 Jul</span><strong>No action surfaced</strong><small>ARIA stayed quiet</small></div></div></section>
+    <section className="trust" aria-labelledby="trust-title"><div><p className="eyebrow">TRUST LEDGER</p><h2 id="trust-title">What ARIA helped {merchant.name} notice</h2><p>Entries come from this merchant’s 12-week synthetic history. ARIA suggests a draft; it never messages customers or makes financial decisions without the merchant.</p></div><div className="ledger" role="list">{ledger.length ? ledger.map((entry) => <div role="listitem" key={entry.id}><span>{formatLedgerDate(entry.occurredAt)}</span><strong>{entry.title}</strong><small>{entry.status}</small></div>) : <p className="ledger-empty">Connect the API to load this merchant’s synthetic history.</p>}</div></section>
 
-    {draftNotice && <div className="toast" role="status" aria-live="polite"><strong>Draft ready for Aisha’s review</strong><span>{draftNotice}</span><button onClick={() => setDraftNotice(null)}>Dismiss</button></div>}
+    {draftNotice && <div className="toast" role="status" aria-live="polite"><strong>Draft ready for {merchant.name}’s review</strong><span>{draftNotice}</span><button onClick={() => setDraftNotice(null)}>Dismiss</button></div>}
   </main></>;
 }

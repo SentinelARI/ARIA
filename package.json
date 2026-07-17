@@ -3,7 +3,7 @@
   "private": true,
   "workspaces": ["frontend", "backend"],
   "scripts": {
-    "test": "npm --workspace backend test",
+    "test": "npm --workspace backend test && npm --workspace frontend test",
     "lint": "npm --workspace frontend run lint"
   }
 }

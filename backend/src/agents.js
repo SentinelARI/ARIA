@@ -2,19 +2,33 @@ const day = 86_400_000;
 const priorityThresholds = Object.freeze({ urgency: 70, valueNaira: 50_000 });
 
 function purchasesFor(events, customerId) {
-  return events.filter((event) => event.kind === 'purchase' && event.customerId === customerId).sort((a, b) => new Date(a.occurredAt) - new Date(b.occurredAt));
+  return events.filter((event) => event.kind === 'purchase' && event.customerId === customerId).sort((left, right) => new Date(left.occurredAt) - new Date(right.occurredAt));
 }
 
 function average(values) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function median(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
 function intervals(events) {
   return events.slice(1).map((event, index) => (new Date(event.occurredAt) - new Date(events[index].occurredAt)) / day);
 }
 
-export function deriveCandidates(events, referenceDate = new Date('2026-07-16T07:00:00.000Z')) {
-  const customerIds = [...new Set(events.filter((event) => event.customerId).map((event) => event.customerId))];
+function productLabel(product) {
+  return product.replace(/ wax print$/i, '');
+}
+
+function productPurchases(events, product) {
+  return events.filter((event) => event.kind === 'purchase' && event.product === product && event.quantity > 0);
+}
+
+function deriveChurnCandidates(events, referenceDate) {
+  const customerIds = [...new Set(events.filter((event) => event.kind === 'purchase' && event.customerId).map((event) => event.customerId))];
   const candidates = [];
   for (const customerId of customerIds) {
     const purchases = purchasesFor(events, customerId);
@@ -27,68 +41,165 @@ export function deriveCandidates(events, referenceDate = new Date('2026-07-16T07
     const historicalAmount = average(historical.map((event) => event.amountNaira));
     const amountChange = 1 - latest.amountNaira / historicalAmount;
     if (latestGap > expectedCadence * 1.4 && amountChange > 0.3) {
+      const firstName = customerName.split(' ')[0];
       candidates.push({
         id: `churn-${customerId}`,
         kind: 'churn-risk',
         customerId,
         customerName,
         title: `${customerName} may be drifting away`,
-        action: `Send ${customerName.split(' ')[0]} a personal check-in and show the new Ankara arrivals.`,
-        draftMessage: `Hi ${customerName.split(' ')[0]}, we just received fresh Ankara patterns I think you would like. Should I send you a quick video before they go?`,
+        action: `Send ${firstName} a personal check-in and show the latest ${productLabel(latest.product)} arrivals.`,
+        draftMessage: `Hi ${firstName}, we just received fresh ${productLabel(latest.product)} options I think you would like. Should I send you a quick video before they go?`,
         actionability: 1,
         urgency: 92,
         valueNaira: Math.round(historicalAmount),
         resolved: false,
         confidence: 86,
-        evidence: { expectedCadence, latestGap, historicalAmount, latestAmount: latest.amountNaira, amountChange }
+        evidence: { expectedCadence, latestGap, historicalAmount, latestAmount: latest.amountNaira, amountChange, product: latest.product }
       });
     }
   }
-  candidates.push({
-    id: 'inventory-follow-up',
+  return candidates;
+}
+
+function derivePricingCandidates(events) {
+  const candidates = [];
+  const products = [...new Set(events.filter((event) => event.kind === 'purchase').map((event) => event.product))];
+  for (const product of products) {
+    const purchases = productPurchases(events, product);
+    if (purchases.length < 6) continue;
+    const customerIds = [...new Set(purchases.map((event) => event.customerId))];
+    const unitPriceByCustomer = customerIds.map((customerId) => {
+      const customerPurchases = purchases.filter((event) => event.customerId === customerId);
+      return [customerId, average(customerPurchases.map((event) => event.amountNaira / event.quantity))];
+    });
+    const benchmarkUnitPrice = median(unitPriceByCustomer.map(([, unitPrice]) => unitPrice));
+    for (const customerId of customerIds) {
+      const customerPurchases = purchases.filter((event) => event.customerId === customerId);
+      if (customerPurchases.length < 3) continue;
+      const customerUnitPrice = unitPriceByCustomer.find(([id]) => id === customerId)[1];
+      const discountPercent = 1 - customerUnitPrice / benchmarkUnitPrice;
+      if (discountPercent < 0.18) continue;
+      const latest = customerPurchases.at(-1);
+      const firstName = latest.customerName.split(' ')[0];
+      candidates.push({
+        id: `pricing-${customerId}-${product.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        kind: 'pricing-anomaly',
+        customerId,
+        customerName: latest.customerName,
+        title: `Review ${firstName}’s ${productLabel(product)} price`,
+        action: `Check whether ${firstName}’s repeat ${productLabel(product)} price is still intentional before the next order.`,
+        draftMessage: `Hi ${firstName}, I am reviewing our current ${productLabel(product)} prices before your next order. Should I reserve your usual quantity while I confirm the best option?`,
+        actionability: 1,
+        urgency: 84,
+        valueNaira: Math.round((benchmarkUnitPrice - customerUnitPrice) * latest.quantity * 3),
+        resolved: false,
+        confidence: 82,
+        evidence: { product, benchmarkUnitPrice, customerUnitPrice, discountPercent, observedOrders: customerPurchases.length }
+      });
+    }
+  }
+  return candidates;
+}
+
+function deriveSupplierDelayCandidates(events, referenceDate) {
+  return events
+    .filter((event) => event.kind === 'supplier-delivery' && event.status === 'overdue' && new Date(event.expectedAt) < referenceDate)
+    .map((event) => {
+      const overdueDays = Math.max(1, Math.floor((referenceDate - new Date(event.expectedAt)) / day));
+      return {
+        id: `supplier-delay-${event.id}`,
+        kind: 'supplier-delay',
+        customerId: null,
+        customerName: null,
+        title: `${event.product} delivery is ${overdueDays} days late`,
+        action: `Contact ${event.supplierName} today and confirm a delivery date before the ${event.product} gap affects repeat buyers.`,
+        draftMessage: `Hello ${event.supplierName}, our ${event.product} delivery is now overdue. Please confirm the delivery date today so we can plan stock for customers.`,
+        actionability: 1,
+        urgency: 90,
+        valueNaira: event.amountNaira,
+        resolved: false,
+        confidence: 88,
+        evidence: { supplierName: event.supplierName, product: event.product, quantity: event.quantity, expectedAt: event.expectedAt, overdueDays, orderValueNaira: event.amountNaira }
+      };
+    });
+}
+
+function deriveInventoryCandidate(events, referenceDate) {
+  const restock = events
+    .filter((event) => event.kind === 'transaction' && event.direction === 'debit' && event.category === 'inventory')
+    .sort((left, right) => new Date(right.occurredAt) - new Date(left.occurredAt))[0];
+  if (!restock) return null;
+  const restockAgeDays = Math.floor((referenceDate - new Date(restock.occurredAt)) / day);
+  if (restockAgeDays > 3) return null;
+  const product = productLabel(restock.product ?? 'new inventory');
+  return {
+    id: `inventory-follow-up-${restock.id}`,
     kind: 'inventory',
     customerId: null,
     customerName: null,
-    title: 'Turn yesterday’s Ankara restock into sales',
-    action: 'Share a short arrivals video with your repeat Ankara buyers before the weekend.',
-    draftMessage: 'New Ankara just landed today. I saved the patterns that match what you normally pick — would you like a quick video?',
+    title: `Turn yesterday’s ${product} restock into sales`,
+    action: `Share a short arrivals update with repeat ${product} buyers before the weekend.`,
+    draftMessage: `New ${product} stock just landed. I saved options that match what you normally pick — would you like a quick video?`,
     actionability: 1,
     urgency: 76,
-    valueNaira: 355000,
+    valueNaira: restock.amountNaira,
     resolved: false,
     confidence: 79,
-    evidence: { restockAmount: 355000, restockAgeDays: 1 }
-  });
-  candidates.push({
-    id: 'weekend-bundles',
+    evidence: { product: restock.product, restockAmount: restock.amountNaira, restockAgeDays }
+  };
+}
+
+function deriveSalesOpportunity(events) {
+  const purchases = events.filter((event) => event.kind === 'purchase');
+  if (!purchases.length) return null;
+  const latestProduct = purchases.at(-1).product;
+  return {
+    id: `weekend-bundles-${latestProduct.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
     kind: 'sales-opportunity',
     customerId: null,
     customerName: null,
-    title: 'Create a weekend Ankara bundle offer',
-    action: 'Bundle three slow-moving Ankara patterns and send the offer to customers who bought prints this month.',
-    draftMessage: 'I put together a weekend Ankara bundle with three fresh patterns at a better price. Would you like me to reserve one for you?',
+    title: `Create a weekend ${productLabel(latestProduct)} bundle offer`,
+    action: `Bundle three slower-moving ${productLabel(latestProduct)} options and share the offer with recent buyers.`,
+    draftMessage: `I put together a weekend ${productLabel(latestProduct)} bundle with three options at a better price. Would you like me to reserve one?`,
     actionability: 1,
-    urgency: 72,
+    urgency: 65,
     valueNaira: 195000,
     resolved: false,
     confidence: 74,
-    evidence: { targetValue: 195000, window: 'before the weekend' }
-  });
-  candidates.push({
-    id: 'resolved-payment',
+    evidence: { product: latestProduct, targetValue: 195000, window: 'before the weekend' }
+  };
+}
+
+function deriveResolvedPaymentCandidate(events) {
+  const payment = events.find((event) => event.kind === 'transaction' && event.direction === 'credit' && event.category === 'payment');
+  if (!payment) return null;
+  return {
+    id: `resolved-payment-${payment.id}`,
     kind: 'payment',
-    customerId: 'cust-bisi',
-    customerName: 'Bisi Adeyemi',
-    title: 'Follow up on Bisi’s lace payment',
+    customerId: payment.customerId,
+    customerName: payment.customerName,
+    title: `Follow up on ${payment.customerName}’s payment`,
     action: 'No action needed.',
     draftMessage: '',
     actionability: 0,
     urgency: 68,
-    valueNaira: 125000,
+    valueNaira: payment.amountNaira,
     resolved: true,
     confidence: 100,
-    evidence: { paidAt: '2026-07-14T07:00:00.000Z' }
-  });
+    evidence: { paidAt: payment.occurredAt, amountNaira: payment.amountNaira }
+  };
+}
+
+export function deriveCandidates(events, referenceDate = new Date('2026-07-16T07:00:00.000Z')) {
+  const candidates = [
+    ...deriveChurnCandidates(events, referenceDate),
+    ...derivePricingCandidates(events),
+    ...deriveSupplierDelayCandidates(events, referenceDate),
+    deriveInventoryCandidate(events, referenceDate),
+    deriveSalesOpportunity(events),
+    deriveResolvedPaymentCandidate(events)
+  ].filter(Boolean);
   return candidates;
 }
 
@@ -113,6 +224,14 @@ export function summarizePrioritization(events) {
     actionsSurfaced: actions.length,
     opportunitiesDiscarded: candidates.length - actions.length
   };
+}
+
+export function createTrustLedger(events) {
+  return events
+    .filter((event) => event.kind === 'merchant-action')
+    .sort((left, right) => new Date(right.occurredAt) - new Date(left.occurredAt))
+    .slice(0, 6)
+    .map(({ id, occurredAt, title, status }) => ({ id, occurredAt, title, status }));
 }
 
 export function rederiveDefenseEvidence(events, insightId) {

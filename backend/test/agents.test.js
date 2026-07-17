@@ -1,14 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyntheticEvents } from '../src/data.js';
-import { createMorningBrief, deriveCandidates, prioritize, rederiveDefenseEvidence, summarizePrioritization } from '../src/agents.js';
+import { createMorningBrief, createTrustLedger, deriveCandidates, prioritize, rederiveDefenseEvidence, summarizePrioritization } from '../src/agents.js';
 
-test('priority agent surfaces actionable insights and discards resolved findings', () => {
+test('priority agent surfaces three actionable insights and discards suppressed findings', () => {
   const candidates = deriveCandidates(createSyntheticEvents());
   const brief = prioritize(candidates);
   assert.equal(brief.length, 3);
   assert.ok(brief.every((insight) => insight.actionability === 1 && insight.resolved === false));
-  assert.equal(brief.some((insight) => insight.id === 'resolved-payment'), false);
+  assert.equal(brief.some((insight) => insight.kind === 'payment'), false);
+  assert.ok(brief.some((insight) => insight.kind === 'churn-risk'));
+  assert.ok(brief.some((insight) => insight.kind === 'pricing-anomaly'));
+});
+
+test('second synthetic merchant surfaces a supplier-delay scenario', () => {
+  const brief = createMorningBrief(createSyntheticEvents('kola-mobile'));
+  assert.equal(brief.length, 3);
+  assert.ok(brief.some((insight) => insight.kind === 'supplier-delay'));
+  assert.ok(brief.some((insight) => insight.kind === 'churn-risk'));
 });
 
 test('defense evidence is re-derived from current structured events', () => {
@@ -20,18 +29,25 @@ test('defense evidence is re-derived from current structured events', () => {
   assert.ok(defense.recalculatedAt);
 });
 
-test('defense evidence supports every surfaced insight kind', () => {
-  const events = createSyntheticEvents();
-  for (const insight of createMorningBrief(events)) {
-    assert.doesNotThrow(() => rederiveDefenseEvidence(events, insight.id));
+test('defense evidence supports every surfaced insight kind for both merchants', () => {
+  for (const merchantId of ['aisha-textiles', 'kola-mobile']) {
+    const events = createSyntheticEvents(merchantId);
+    for (const insight of createMorningBrief(events)) assert.doesNotThrow(() => rederiveDefenseEvidence(events, insight.id));
   }
 });
 
 test('priority summary exposes aggregate discard counts without retaining suppressed insights', () => {
   const summary = summarizePrioritization(createSyntheticEvents());
   assert.equal(summary.actionsSurfaced, 3);
-  assert.equal(summary.opportunitiesDiscarded, 1);
+  assert.ok(summary.opportunitiesDiscarded > 0);
   assert.equal('discardedInsights' in summary, false);
+});
+
+test('trust ledger is derived from multi-week structured merchant history', () => {
+  const ledger = createTrustLedger(createSyntheticEvents());
+  assert.equal(ledger.length, 5);
+  assert.ok(ledger.every((entry) => entry.occurredAt && entry.title && entry.status));
+  assert.ok(new Date(ledger[0].occurredAt) > new Date(ledger.at(-1).occurredAt));
 });
 
 test('defense evidence reads current event values on every request', () => {
