@@ -1,8 +1,9 @@
 import cors from 'cors';
 import express from 'express';
 import { createSyntheticEvents, demoMerchant } from './data.js';
-import { createMorningBrief, rederiveDefense, summarizePrioritization } from './agents.js';
-import { executeInSandbox, generateAnalysisCode } from './sandbox.js';
+import { createMorningBrief, rederiveDefenseEvidence, summarizePrioritization } from './agents.js';
+import { generateAnalysisProgram, generateDefenseNarrative } from './ai.js';
+import { executeInSandbox } from './sandbox.js';
 
 const app = express();
 const events = createSyntheticEvents();
@@ -34,13 +35,16 @@ app.get('/api/brief', (_request, response) => {
   metrics.briefRequests += 1;
   return response.json({ merchant: demoMerchant, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events) });
 });
-app.post('/api/defense', (request, response) => {
+app.post('/api/defense', async (request, response) => {
   try {
     if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
     metrics.defenseRequests += 1;
-    return response.json(rederiveDefense(events, request.body.insightId));
+    const defense = rederiveDefenseEvidence(events, request.body.insightId);
+    const narrative = await generateDefenseNarrative(defense);
+    return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
   } catch (error) {
-    return response.status(404).json({ error: error.message });
+    const status = error.message === 'Insight not found in the current signal set.' ? 404 : 503;
+    return response.status(status).json({ error: error.message });
   }
 });
 app.post('/api/analysis', analysisRateLimit, async (request, response) => {
@@ -48,7 +52,7 @@ app.post('/api/analysis', analysisRateLimit, async (request, response) => {
     const question = request.body?.question;
     if (typeof question !== 'string' || question.trim().length < 3 || question.length > 300) return response.status(400).json({ error: 'Ask a short question about sales or customers.' });
     metrics.analysisRequests += 1;
-    const code = generateAnalysisCode(question, events);
+    const code = await generateAnalysisProgram({ question, events });
     const result = await executeInSandbox(code);
     return response.json({ result, generatedCode: code });
   } catch (error) {

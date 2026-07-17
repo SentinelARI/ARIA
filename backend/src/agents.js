@@ -115,29 +115,19 @@ export function summarizePrioritization(events) {
   };
 }
 
-export function rederiveDefense(events, insightId) {
+export function rederiveDefenseEvidence(events, insightId) {
   const candidate = deriveCandidates(events).find((item) => item.id === insightId);
   if (!candidate) throw new Error('Insight not found in the current signal set.');
-  if (candidate.kind === 'churn-risk') {
-    const { expectedCadence, latestGap, historicalAmount, latestAmount } = candidate.evidence;
-    return {
-      insightId,
-      narrative: `I checked ${candidate.customerName}'s actual order rhythm again. Her earlier purchases arrived about every ${Math.round(expectedCadence)} days, but it has now been ${Math.round(latestGap)} days since her smaller ₦${latestAmount.toLocaleString('en-NG')} order. Her usual order was about ₦${Math.round(historicalAmount).toLocaleString('en-NG')}. The longer gap and smaller basket happening together is why I marked this as a timely, high-value check-in rather than a routine reminder.`,
-      confidence: candidate.confidence,
-      recalculatedAt: new Date().toISOString()
-    };
-  }
-  if (candidate.kind === 'sales-opportunity') {
-    return {
-      insightId,
-      narrative: `I rechecked the current inventory and recent print buyers. The bundle is time-sensitive because it should reach customers before the weekend, and it targets about ₦${candidate.evidence.targetValue.toLocaleString('en-NG')} in stock that can move with a clear offer rather than another generic broadcast.`,
-      confidence: candidate.confidence,
-      recalculatedAt: new Date().toISOString()
-    };
-  }
   return {
     insightId,
-    narrative: `I checked the current signals again: the ₦${candidate.evidence.restockAmount.toLocaleString('en-NG')} Ankara restock was recorded yesterday. Reaching repeat buyers before the weekend gives this stock the best chance of turning into cash quickly.`,
+    insight: {
+      kind: candidate.kind,
+      title: candidate.title,
+      action: candidate.action,
+      customerName: candidate.customerName,
+      valueNaira: candidate.valueNaira
+    },
+    evidence: candidate.evidence,
     confidence: candidate.confidence,
     recalculatedAt: new Date().toISOString()
   };

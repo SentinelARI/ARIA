@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyntheticEvents } from '../src/data.js';
-import { createMorningBrief, deriveCandidates, prioritize, rederiveDefense, summarizePrioritization } from '../src/agents.js';
+import { createMorningBrief, deriveCandidates, prioritize, rederiveDefenseEvidence, summarizePrioritization } from '../src/agents.js';
 
 test('priority agent surfaces actionable insights and discards resolved findings', () => {
   const candidates = deriveCandidates(createSyntheticEvents());
@@ -11,19 +11,19 @@ test('priority agent surfaces actionable insights and discards resolved findings
   assert.equal(brief.some((insight) => insight.id === 'resolved-payment'), false);
 });
 
-test('defense agent re-derives churn evidence from structured events', () => {
+test('defense evidence is re-derived from current structured events', () => {
   const events = createSyntheticEvents();
   const insight = createMorningBrief(events).find((item) => item.kind === 'churn-risk');
-  const defense = rederiveDefense(events, insight.id);
-  assert.match(defense.narrative, /order rhythm again/);
-  assert.match(defense.narrative, /Amara Okafor/);
+  const defense = rederiveDefenseEvidence(events, insight.id);
+  assert.equal(defense.insight.customerName, 'Amara Okafor');
+  assert.ok(defense.evidence.expectedCadence > 0);
   assert.ok(defense.recalculatedAt);
 });
 
-test('defense agent supports every surfaced insight kind', () => {
+test('defense evidence supports every surfaced insight kind', () => {
   const events = createSyntheticEvents();
   for (const insight of createMorningBrief(events)) {
-    assert.doesNotThrow(() => rederiveDefense(events, insight.id));
+    assert.doesNotThrow(() => rederiveDefenseEvidence(events, insight.id));
   }
 });
 
@@ -34,11 +34,11 @@ test('priority summary exposes aggregate discard counts without retaining suppre
   assert.equal('discardedInsights' in summary, false);
 });
 
-test('defense agent reads current event values on every request', () => {
+test('defense evidence reads current event values on every request', () => {
   const events = createSyntheticEvents();
   const insight = createMorningBrief(events).find((item) => item.kind === 'churn-risk');
-  const original = rederiveDefense(events, insight.id).narrative;
+  const original = rederiveDefenseEvidence(events, insight.id).evidence.latestAmount;
   events.filter((event) => event.customerId === 'cust-amara').at(-1).amountNaira = 51_000;
-  const updated = rederiveDefense(events, insight.id).narrative;
+  const updated = rederiveDefenseEvidence(events, insight.id).evidence.latestAmount;
   assert.notEqual(updated, original);
 });
