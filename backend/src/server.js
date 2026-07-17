@@ -1,7 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import { pathToFileURL } from 'node:url';
-import { createSyntheticMerchantData, demoMerchants } from './data.js';
+import { createSyntheticMerchantData, demoMerchants, demoReferenceDate } from './data.js';
 import { createMorningBrief, createTrustLedger, rederiveDefenseEvidence, summarizePrioritization } from './agents.js';
 import { generateAnalysisProgram, generateDefenseNarrative, streamDefenseNarrative } from './ai.js';
 import { executeInSandbox } from './sandbox.js';
@@ -32,26 +32,32 @@ function messageFor(error) {
   return error instanceof Error ? error.message : 'ARIA could not complete that request.';
 }
 
-export function createApp({ merchantData = createSyntheticMerchantData(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, rateLimitMaximum = 10 } = {}) {
+export function createApp({ merchantData = createSyntheticMerchantData(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, rateLimitMaximum = 10, defenseRateLimitMaximum = 20 } = {}) {
   const app = express();
   const analysisRequests = new Map();
-  const metrics = { briefRequests: 0, defenseRequests: 0, analysisRequests: 0, analysisFailures: 0 };
+  const defenseRequests = new Map();
 
-  function analysisRateLimit(request, response, next) {
+  function rateLimit(requests, maximumRequests, errorMessage) {
+    return function applyRateLimit(request, response, next) {
     const now = Date.now();
     const key = request.ip ?? 'unknown';
     const windowMs = 60_000;
-    const entry = analysisRequests.get(key);
+      const entry = requests.get(key);
     const current = !entry || now - entry.startedAt >= windowMs ? { startedAt: now, count: 0 } : entry;
     current.count += 1;
-    analysisRequests.set(key, current);
-    response.set('RateLimit-Limit', String(rateLimitMaximum));
-    response.set('RateLimit-Remaining', String(Math.max(0, rateLimitMaximum - current.count)));
-    if (current.count > rateLimitMaximum) return response.status(429).json({ error: 'Please wait a minute before running more analyses.' });
+      requests.set(key, current);
+      response.set('RateLimit-Limit', String(maximumRequests));
+      response.set('RateLimit-Remaining', String(Math.max(0, maximumRequests - current.count)));
+      if (current.count > maximumRequests) return response.status(429).json({ error: errorMessage });
     return next();
+    };
   }
 
+  const analysisRateLimit = rateLimit(analysisRequests, rateLimitMaximum, 'Please wait a minute before running more analyses.');
+  const defenseRateLimit = rateLimit(defenseRequests, defenseRateLimitMaximum, 'Please wait a minute before asking ARIA to re-check another action.');
+
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
   app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : process.env.NODE_ENV === 'production' ? false : true, methods: ['GET', 'POST'], maxAge: 86_400 }));
   app.use(express.json({ limit: '8kb', strict: true }));
 
@@ -60,17 +66,15 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
   app.get('/api/brief', (request, response) => {
     try {
       const { merchant, events } = resolveMerchant(merchantData, request.query.merchant);
-      metrics.briefRequests += 1;
-      return response.json({ merchant, merchants: demoMerchants, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events), ledger: createTrustLedger(events) });
+      return response.json({ merchant, merchants: demoMerchants, simulatedAt: demoReferenceDate, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events), ledger: createTrustLedger(events) });
     } catch (error) {
       return response.status(404).json({ error: messageFor(error) });
     }
   });
-  app.post('/api/defense', async (request, response) => {
+  app.post('/api/defense', defenseRateLimit, async (request, response) => {
     try {
       if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
       const { events } = resolveMerchant(merchantData, request.body.merchantId);
-      metrics.defenseRequests += 1;
       const defense = rederiveDefenseEvidence(events, request.body.insightId);
       const narrative = await defenseNarrative(defense);
       return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
@@ -80,14 +84,13 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
       return response.status(status).json({ error: message });
     }
   });
-  app.post('/api/defense/stream', async (request, response) => {
+  app.post('/api/defense/stream', defenseRateLimit, async (request, response) => {
     try {
       if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
       const { events } = resolveMerchant(merchantData, request.body.merchantId);
       const defense = rederiveDefenseEvidence(events, request.body.insightId);
       const controller = new AbortController();
       request.on('aborted', () => controller.abort());
-      metrics.defenseRequests += 1;
       response.status(200).set({
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
@@ -113,19 +116,15 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
     try {
       const question = validateQuestion(request.body?.question);
       const { events } = resolveMerchant(merchantData, request.body?.merchantId);
-      metrics.analysisRequests += 1;
       const code = await analysisProgram({ question, events });
       const result = await sandbox(code);
       return response.json({ result, generatedCode: code });
     } catch (error) {
-      metrics.analysisFailures += 1;
       const message = messageFor(error);
       const status = message.startsWith('Ask a business') || message.startsWith('ARIA cannot') || message.startsWith('ARIA only') ? 400 : message === 'Merchant not found.' ? 404 : 422;
       return response.status(status).json({ error: message });
     }
   });
-  app.get('/api/metrics', (_request, response) => response.json({ ...metrics }));
-
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) return response.status(400).json({ error: 'Send valid JSON.' });
     return response.status(500).json({ error: 'ARIA could not complete that request.' });

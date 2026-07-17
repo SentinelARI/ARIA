@@ -30,8 +30,8 @@ async function withServer(app, run) {
   }
 }
 
-function post(baseUrl, path, body) {
-  return fetch(`${baseUrl}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function post(baseUrl, path, body, headers = {}) {
+  return fetch(`${baseUrl}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
 }
 
 test('brief returns two selectable merchants and a derived trust ledger', async () => {
@@ -43,6 +43,7 @@ test('brief returns two selectable merchants and a derived trust ledger', async 
     assert.equal(payload.merchants.length, 2);
     assert.ok(payload.ledger.length >= 5);
     assert.ok(payload.actions.some((action) => action.kind === 'supplier-delay'));
+    assert.equal(payload.simulatedAt, '2026-07-16T07:00:00.000Z');
   });
 });
 
@@ -85,5 +86,36 @@ test('analysis accepts a business question and gives a clean rate-limit response
     assert.equal(second.status, 200);
     assert.equal(third.status, 429);
     assert.match((await third.json()).error, /wait a minute/);
+  });
+});
+
+test('rate limits use forwarded client addresses behind Railway proxy', async () => {
+  await withServer(createTestApp({ rateLimitMaximum: 1 }), async (baseUrl) => {
+    const firstClient = { 'X-Forwarded-For': '198.51.100.10' };
+    const secondClient = { 'X-Forwarded-For': '198.51.100.11' };
+    const first = await post(baseUrl, '/api/analysis', { question: 'Which customers have gone quiet?' }, firstClient);
+    const second = await post(baseUrl, '/api/analysis', { question: 'Which customers have gone quiet?' }, secondClient);
+    const repeatedFirst = await post(baseUrl, '/api/analysis', { question: 'Which customers have gone quiet?' }, firstClient);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(repeatedFirst.status, 429);
+  });
+});
+
+test('both defense routes share a clean per-client rate limit', async () => {
+  await withServer(createTestApp({ defenseRateLimitMaximum: 1 }), async (baseUrl) => {
+    const body = { merchantId: 'aisha-textiles', insightId: 'churn-cust-amara' };
+    const first = await post(baseUrl, '/api/defense', body);
+    const second = await post(baseUrl, '/api/defense/stream', body);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 429);
+    assert.match((await second.json()).error, /re-check another action/);
+  });
+});
+
+test('public metrics endpoint is not exposed', async () => {
+  await withServer(createTestApp(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/metrics`);
+    assert.equal(response.status, 404);
   });
 });

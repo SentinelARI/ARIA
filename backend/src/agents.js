@@ -1,6 +1,15 @@
 const day = 86_400_000;
 const priorityThresholds = Object.freeze({ urgency: 70, valueNaira: 50_000 });
 
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function scaledConfidence({ base, ceiling, signals }) {
+  const strength = signals.reduce((sum, value) => sum + clamp(value, 0, 1), 0) / signals.length;
+  return Math.round(base + strength * (ceiling - base));
+}
+
 function purchasesFor(events, customerId) {
   return events.filter((event) => event.kind === 'purchase' && event.customerId === customerId).sort((left, right) => new Date(left.occurredAt) - new Date(right.occurredAt));
 }
@@ -42,6 +51,9 @@ function deriveChurnCandidates(events, referenceDate) {
     const amountChange = 1 - latest.amountNaira / historicalAmount;
     if (latestGap > expectedCadence * 1.4 && amountChange > 0.3) {
       const firstName = customerName.split(' ')[0];
+      const gapSignal = (latestGap / expectedCadence - 1.4) / 1.4;
+      const amountSignal = (amountChange - 0.3) / 0.4;
+      const confidence = scaledConfidence({ base: 62, ceiling: 95, signals: [gapSignal, amountSignal] });
       candidates.push({
         id: `churn-${customerId}`,
         kind: 'churn-risk',
@@ -54,8 +66,8 @@ function deriveChurnCandidates(events, referenceDate) {
         urgency: 92,
         valueNaira: Math.round(historicalAmount),
         resolved: false,
-        confidence: 86,
-        evidence: { expectedCadence, latestGap, historicalAmount, latestAmount: latest.amountNaira, amountChange, product: latest.product }
+        confidence,
+        evidence: { expectedCadence, latestGap, historicalAmount, latestAmount: latest.amountNaira, amountChange, product: latest.product, series: historical.slice(-5).map((event) => event.amountNaira).concat(latest.amountNaira) }
       });
     }
   }
@@ -82,6 +94,10 @@ function derivePricingCandidates(events) {
       if (discountPercent < 0.18) continue;
       const latest = customerPurchases.at(-1);
       const firstName = latest.customerName.split(' ')[0];
+      const observedOrders = customerPurchases.length;
+      const discountSignal = (discountPercent - 0.18) / 0.32;
+      const sampleSignal = (observedOrders - 3) / 5;
+      const confidence = scaledConfidence({ base: 60, ceiling: 93, signals: [discountSignal, sampleSignal] });
       candidates.push({
         id: `pricing-${customerId}-${product.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
         kind: 'pricing-anomaly',
@@ -92,10 +108,11 @@ function derivePricingCandidates(events) {
         draftMessage: `Hi ${firstName}, I am reviewing our current ${productLabel(product)} prices before your next order. Should I reserve your usual quantity while I confirm the best option?`,
         actionability: 1,
         urgency: 84,
+        // Project three expected repeat orders to estimate near-term recoverable pricing value.
         valueNaira: Math.round((benchmarkUnitPrice - customerUnitPrice) * latest.quantity * 3),
         resolved: false,
-        confidence: 82,
-        evidence: { product, benchmarkUnitPrice, customerUnitPrice, discountPercent, observedOrders: customerPurchases.length }
+        confidence,
+        evidence: { product, benchmarkUnitPrice, customerUnitPrice, discountPercent, observedOrders }
       });
     }
   }
@@ -107,6 +124,7 @@ function deriveSupplierDelayCandidates(events, referenceDate) {
     .filter((event) => event.kind === 'supplier-delivery' && event.status === 'overdue' && new Date(event.expectedAt) < referenceDate)
     .map((event) => {
       const overdueDays = Math.max(1, Math.floor((referenceDate - new Date(event.expectedAt)) / day));
+      const confidence = Math.round(clamp(82 + overdueDays * 2, 82, 97));
       return {
         id: `supplier-delay-${event.id}`,
         kind: 'supplier-delay',
@@ -119,7 +137,7 @@ function deriveSupplierDelayCandidates(events, referenceDate) {
         urgency: 90,
         valueNaira: event.amountNaira,
         resolved: false,
-        confidence: 88,
+        confidence,
         evidence: { supplierName: event.supplierName, product: event.product, quantity: event.quantity, expectedAt: event.expectedAt, overdueDays, orderValueNaira: event.amountNaira }
       };
     });
@@ -133,6 +151,7 @@ function deriveInventoryCandidate(events, referenceDate) {
   const restockAgeDays = Math.floor((referenceDate - new Date(restock.occurredAt)) / day);
   if (restockAgeDays > 3) return null;
   const product = productLabel(restock.product ?? 'new inventory');
+  const confidence = Math.round(clamp(92 - restockAgeDays * 5, 70, 92));
   return {
     id: `inventory-follow-up-${restock.id}`,
     kind: 'inventory',
@@ -145,7 +164,7 @@ function deriveInventoryCandidate(events, referenceDate) {
     urgency: 76,
     valueNaira: restock.amountNaira,
     resolved: false,
-    confidence: 79,
+    confidence,
     evidence: { product: restock.product, restockAmount: restock.amountNaira, restockAgeDays }
   };
 }
@@ -166,6 +185,7 @@ function deriveSalesOpportunity(events) {
     urgency: 65,
     valueNaira: 195000,
     resolved: false,
+    // This is a generic recommendation, so it intentionally uses a lower static baseline.
     confidence: 74,
     evidence: { product: latestProduct, targetValue: 195000, window: 'before the weekend' }
   };

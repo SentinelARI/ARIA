@@ -26,7 +26,20 @@ test('defense evidence is re-derived from current structured events', () => {
   const defense = rederiveDefenseEvidence(events, insight.id);
   assert.equal(defense.insight.customerName, 'Amara Okafor');
   assert.ok(defense.evidence.expectedCadence > 0);
+  assert.equal(defense.evidence.series.length, 6);
+  assert.equal(defense.evidence.series.at(-1), defense.evidence.latestAmount);
   assert.ok(defense.recalculatedAt);
+});
+
+test('confidence scales with the strength and sample size of real evidence', () => {
+  const events = createSyntheticEvents();
+  const baseChurn = deriveCandidates(events).find((candidate) => candidate.kind === 'churn-risk');
+  const strongerChurn = deriveCandidates(events, new Date('2026-07-28T07:00:00.000Z')).find((candidate) => candidate.kind === 'churn-risk');
+  const pricing = deriveCandidates(events).find((candidate) => candidate.kind === 'pricing-anomaly');
+  const inventory = deriveCandidates(events).find((candidate) => candidate.kind === 'inventory');
+  assert.ok(strongerChurn.confidence > baseChurn.confidence);
+  assert.ok(pricing.confidence >= 60 && pricing.confidence <= 93);
+  assert.equal(inventory.confidence, 87);
 });
 
 test('defense evidence supports every surfaced insight kind for both merchants', () => {

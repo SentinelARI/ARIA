@@ -25,20 +25,20 @@ npm --workspace backend run dev
 npm --workspace frontend run dev
 ```
 
-Open `http://localhost:3000`. The frontend expects the API at `http://localhost:4000`; set `NEXT_PUBLIC_API_URL` when deploying.
+Open `http://localhost:3000`. The frontend expects the API at `http://localhost:4000`; set `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_SITE_URL` to the Vercel deployment URL when deploying.
 
 ## Security model
 
 The analysis model receives the merchant's business question and validated, structured synthetic events only; raw source text is excluded. Questions are bounded to 3–300 characters, checked for business relevance, and rejected before model execution when they attempt instruction injection or secret access. Generated programs are statically rejected if they use modules, processes, filesystem, network, dynamic evaluation, imports, or dynamic loading.
 
-Every accepted program runs in a fresh `isolated-vm` V8 isolate with a 128 MB memory limit and a five-second execution timeout. The API does not inject Node globals, host callbacks, `require`, `process`, filesystem APIs, network APIs, or child-process APIs into that isolate. The execution boundary—not the token filter—prevents capability access. The API rate-limits analysis requests and disables permissive CORS in production unless `FRONTEND_ORIGIN` is configured.
+Every accepted program runs in a fresh `isolated-vm` V8 isolate with a 128 MB memory limit and a five-second execution timeout. The API does not inject Node globals, host callbacks, `require`, `process`, filesystem APIs, network APIs, or child-process APIs into that isolate. The execution boundary—not the token filter—prevents capability access. The API rate-limits analysis and Defense requests per client, trusts one Railway proxy hop for accurate client addresses, and disables permissive CORS in production unless `FRONTEND_ORIGIN` is configured.
 
 `isolated-vm` is a native dependency. ARIA starts Node with `--no-node-snapshot`, as required by the package for Node 20+. Confirm Railway's first build completes the native dependency install before recording the demo.
 
-The current event adapter, rate limiter, trust history, and metrics are in-memory demo shortcuts; replace them with Postgres and a shared rate-limit store before any multi-user deployment. Configure `FRONTEND_ORIGIN`, place the API behind TLS, and add authentication before connecting real merchant data.
+The current event adapter, rate limiter, and trust history are in-memory demo shortcuts; replace them with Postgres and a shared rate-limit store before any multi-user deployment. Configure `FRONTEND_ORIGIN`, place the API behind TLS, and add authentication before connecting real merchant data.
 
 ## Test coverage
 
-`npm test` covers priority discard behavior, current-evidence re-derivation, two merchant scenarios, trust-ledger derivation, OpenAI request and streaming contracts through mocked SDK responses, SSE response framing, hostile query handling, rate limiting, generated-code validation, direct isolate capability-escape attempts, and WCAG AA checks for the key lime/gold color pairs.
+`npm test` covers priority discard behavior, current-evidence re-derivation, two merchant scenarios, trust-ledger derivation, OpenAI request and streaming contracts through mocked SDK responses, SSE response framing, hostile query handling, proxy-aware analysis and Defense rate limits, retired public metrics, generated-code validation, direct isolate capability-escape attempts, and WCAG AA checks for the key lime/gold color pairs.
 
 GitHub Actions installs locked dependencies, scans tracked source for credential-shaped values, runs the full test suite, and builds the frontend on every pull request and push to `main`.

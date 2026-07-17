@@ -1,5 +1,6 @@
 const day = 86_400_000;
-const now = new Date('2026-07-16T07:00:00.000Z');
+export const demoReferenceDate = '2026-07-16T07:00:00.000Z';
+const now = new Date(demoReferenceDate);
 
 export const demoMerchants = Object.freeze([
   Object.freeze({ id: 'aisha-textiles', name: 'Aisha', business: 'Aisha Textiles', location: 'Yaba, Lagos', sector: 'Fabric retail' }),
