@@ -159,7 +159,7 @@ function AgentFlow({ active }) {
     ['Priority', 'Priority Agent', 'shield', 'Discards anything that fails actionability, urgency, or value'],
     ['Defense', 'Defense Agent', 'message', 'Re-derives its reasoning live whenever asked why']
   ];
-  return <section className="control-room" aria-labelledby="control-title"><div><p className="eyebrow">CONTROL ROOM</p><h2 id="control-title">ARIA is a live decision system</h2><p>Each answer starts with structured synthetic events. Priority discards noise; Defense re-checks evidence on every request.</p></div><ol className="agent-flow">{agents.map(([id, label, icon, blurb], index) => <li key={id} className={active === id ? 'active' : ''}><div className="agent-flow-top"><span>{String(index + 1).padStart(2, '0')}</span><Icon name={icon} size={18} /></div><div><strong>{label}</strong><small>{blurb}</small></div></li>)}</ol></section>;
+  return <section className="control-room textile-motif" aria-labelledby="control-title"><div><p className="eyebrow">CONTROL ROOM</p><h2 id="control-title">How ARIA reaches today’s brief</h2><p>Each answer begins with structured synthetic events. Priority removes noise; Defense checks the current evidence again when asked.</p></div><ol className="agent-flow">{agents.map(([id, label, icon, blurb], index) => <li key={id} className={active === id ? 'active' : ''}><div className="agent-flow-top"><span>{String(index + 1).padStart(2, '0')}</span><Icon name={icon} size={18} /></div><div><strong>{label}</strong><small>{blurb}</small></div></li>)}</ol></section>;
 }
 
 export default function Home() {
@@ -338,19 +338,23 @@ export default function Home() {
   const copy = pidgin ? {
     greeting: `Good ${greeting}, ${merchant.name}.`,
     subhead: 'Na only the things wey need your attention today.',
-    brief: 'Your next best moves',
+    brief: `Wetin need ${merchant.name} attention today`,
+    briefNote: `This week, ${summary.signalsRead} signals land. ${summary.opportunitiesDiscarded} no need ${merchant.name} time.`,
+    liveReasoning: 'See as ARIA dey work am out, live',
     question: 'Ask ARIA anything about this business',
     helper: 'Try sales this week or customers wey don quiet.'
   } : {
     greeting: `Good ${greeting}, ${merchant.name}.`,
     subhead: 'Here’s what matters today.',
-    brief: 'Your next best moves',
+    brief: `What needs ${merchant.name}’s attention today`,
+    briefNote: `This week, ${summary.signalsRead} signals came in. ${summary.opportunitiesDiscarded} did not need ${merchant.name}’s time.`,
+    liveReasoning: 'Watching this get worked out, live',
     question: 'Ask ARIA a new business question',
     helper: 'Ask about sales, customers, stock, prices, or suppliers.'
   };
 
   return <><a className="skip-link" href="#morning-brief">Skip to your Morning Brief</a><main>
-    <section className="hero">
+    <section className="hero textile-motif">
       <nav className="nav" aria-label="Application controls"><div className="brand"><span className="brand-mark"><Icon name="spark" size={18} /></span><span>ARIA</span></div><div className="nav-controls"><span className="live"><i /> Watching synthetic signals</span><button className="icon-button" onClick={() => setPidgin((value) => !value)} aria-label={`Switch to ${pidgin ? 'English' : 'Pidgin'} copy`} aria-pressed={pidgin}>{pidgin ? 'EN' : 'PG'}</button><button className="icon-button" onClick={() => setTheme((value) => value === 'light' ? 'dark' : 'light')} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}><Icon name={theme === 'light' ? 'moon' : 'sun'} size={18} /></button></div></nav>
       {briefError && <p className="live-data-warning" role="alert">{briefError}</p>}
       <div className="hero-copy"><p className="eyebrow">{lagosWeekday} · {merchant.location?.toUpperCase()}</p><h1>{copy.greeting}<br /><em>{copy.subhead}</em></h1><p>ARIA reads the signals from {merchant.business}, then keeps only the actions worth a merchant’s time.</p></div>
@@ -358,12 +362,12 @@ export default function Home() {
       <div className="signal-strip" aria-busy={briefLoading}><span><Icon name="shield" size={17} /> {summary.actionsSurfaced} actions surfaced</span><span>{summary.signalsRead} synthetic signals read · <strong aria-label={`${summary.opportunitiesDiscarded} opportunities quietly discarded`}>{animatedDiscardCount}</strong> opportunity quietly discarded</span><button onClick={speakBrief}><Icon name="volume" size={17} /> Listen to brief</button></div>
     </section>
 
-    <section className="brief" id="morning-brief" aria-labelledby="brief-title"><div className="section-heading"><div><p className="eyebrow">MORNING BRIEF</p><h2 id="brief-title">{copy.brief}</h2></div><p className="quiet">No hidden queue. Unhelpful opportunities are discarded.</p></div>
+    <section className="brief" id="morning-brief" aria-labelledby="brief-title"><div className="section-heading"><div><p className="eyebrow">MORNING BRIEF</p><h2 id="brief-title">{copy.brief}</h2></div><p className="quiet">{copy.briefNote}</p></div>
       <div className="action-list" key={merchantId}>{actions.map((action, index) => {
         const defense = defenses[action.id];
         const expanded = expandedId === action.id;
         const defenseConfidence = defense?.confidence ?? action.confidence;
-        return <article className={`action-card ${expanded ? 'expanded' : ''}`} style={{ '--enter-index': index }} key={action.id}><div className="rank">0{index + 1}</div><div className="action-content"><p className="type" aria-label={`${typeLabel(action.kind)} · ${action.confidence}% confidence`}>{typeLabel(action.kind)} <span>·</span> <AnimatedNumber value={action.confidence} />% confidence</p><h3>{action.title}</h3><p className="action-text">{action.action}</p>{action.kind === 'churn-risk' && <Sparkline series={action.evidence?.series} />}<div className="action-buttons"><button className={`primary ${sentActionId === action.id ? 'confirmed' : ''}`} onClick={() => useDraft(action)}>{sentActionId === action.id ? <><Icon name="check" size={17} /> Draft ready</> : <><Icon name="message" size={17} /> Use draft <Icon name="arrow" size={16} /></>}</button><button className="secondary" onClick={() => askWhy(action)} aria-expanded={expanded}>{expanded ? 'Hide reasoning' : 'Why did ARIA pick this?'}</button></div><div className={`defense-region ${expanded ? 'expanded' : ''}`} aria-live="polite">{expanded && <section className="defense" aria-busy={defenseLoading === action.id}><p className="eyebrow">LIVE RE-DERIVATION · STREAMING</p>{defenseLoading === action.id && !defense?.narrative ? <p className="thinking" role="status"><span /><span /><span /> ARIA is re-checking current signals</p> : <><p className={defense?.error ? 'defense-error' : ''}>{defense?.narrative}</p><div className="confidence"><span>Calculated from current structured events</span><strong aria-label={`${defenseConfidence}% confidence`}><AnimatedNumber value={defenseConfidence} />% confidence</strong></div></>}</section>}</div></div><div className="score" aria-label={`Priority score ${action.priorityScore}`}><strong aria-hidden="true"><AnimatedNumber value={action.priorityScore} /></strong><span>priority</span></div></article>;
+        return <article className={`action-card ${expanded ? 'expanded' : ''}`} style={{ '--enter-index': index }} key={action.id}><div className="rank">0{index + 1}</div><div className="action-content"><p className="type" aria-label={`${typeLabel(action.kind)} · ${action.confidence}% confidence`}>{typeLabel(action.kind)} <span>·</span> <AnimatedNumber value={action.confidence} />% confidence</p><h3>{action.title}</h3><p className="action-text">{action.action}</p>{action.kind === 'churn-risk' && <Sparkline series={action.evidence?.series} />}<div className="action-buttons"><button className={`primary ${sentActionId === action.id ? 'confirmed' : ''}`} onClick={() => useDraft(action)}>{sentActionId === action.id ? <><Icon name="check" size={17} /> Draft ready</> : <><Icon name="message" size={17} /> Use draft <Icon name="arrow" size={16} /></>}</button><button className="secondary" onClick={() => askWhy(action)} aria-expanded={expanded}>{expanded ? 'Hide reasoning' : 'Why did ARIA pick this?'}</button></div><div className={`defense-region ${expanded ? 'expanded' : ''}`} aria-live="polite">{expanded && <section className="defense" aria-busy={defenseLoading === action.id}><p className="eyebrow">{copy.liveReasoning}</p>{defenseLoading === action.id && !defense?.narrative ? <p className="thinking" role="status"><span /><span /><span /> ARIA is re-checking current signals</p> : <><p className={defense?.error ? 'defense-error' : ''}>{defense?.narrative}</p><div className="confidence"><span>Calculated from current structured events</span><strong aria-label={`${defenseConfidence}% confidence`}><AnimatedNumber value={defenseConfidence} />% confidence</strong></div></>}</section>}</div></div><div className="score" aria-label={`Priority score ${action.priorityScore}`}><strong aria-hidden="true"><AnimatedNumber value={action.priorityScore} /></strong><span>priority</span></div></article>;
       })}</div>
     </section>
 
@@ -371,7 +375,7 @@ export default function Home() {
 
     <AgentFlow active={activeAgent} />
 
-    <section className="trust" aria-labelledby="trust-title"><div><p className="eyebrow">TRUST LEDGER</p><h2 id="trust-title">What ARIA helped {merchant.name} notice</h2><p>Entries come from this merchant’s 12-week synthetic history. ARIA suggests a draft; it never messages customers or makes financial decisions without the merchant.</p></div><div className="ledger" role="list">{ledger.length ? ledger.map((entry) => <div role="listitem" key={entry.id}><span>{formatLedgerDate(entry.occurredAt)}</span><strong>{entry.title}</strong><small>{entry.status}</small></div>) : <p className="ledger-empty">Connect the API to load this merchant’s synthetic history.</p>}</div></section>
+    <section className="trust" aria-labelledby="trust-title"><div className="trust-intro"><p className="eyebrow">TRUST LEDGER</p><h2 id="trust-title">What ARIA helped {merchant.name} notice</h2><p>Entries come from this merchant’s 12-week synthetic history. ARIA suggests a draft; it never messages customers or makes financial decisions without the merchant.</p></div><div className="ledger-summary" aria-label={`${summary.actionsSurfaced} actions surfaced for ${merchant.name} today`}><span className="ledger-highlight" aria-hidden="true"><AnimatedNumber value={summary.actionsSurfaced} /></span><p><strong>{summary.actionsSurfaced} actions</strong> worth {merchant.name}’s time today.</p></div><div className="ledger" role="list">{ledger.length ? ledger.map((entry) => <div role="listitem" key={entry.id}><span>{formatLedgerDate(entry.occurredAt)}</span><strong>{entry.title}</strong><small>{entry.status}</small></div>) : <p className="ledger-empty">Connect the API to load this merchant’s synthetic history.</p>}</div></section>
 
     {draftNotice && <div className="toast" role="status" aria-live="polite"><strong>Draft ready for {merchant.name}’s review</strong><span>{draftNotice}</span><button onClick={() => setDraftNotice(null)}>Dismiss</button></div>}
   </main></>;
