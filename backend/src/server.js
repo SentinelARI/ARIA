@@ -2,8 +2,10 @@ import cors from 'cors';
 import express from 'express';
 import { pathToFileURL } from 'node:url';
 import { createSyntheticMerchantData, demoMerchants, demoReferenceDate } from './data.js';
-import { createMorningBrief, createTrustLedger, rederiveDefenseEvidence, summarizePrioritization } from './agents.js';
+import { createMorningBrief, createTrustLedger, rederiveDefenseEvidence, summarizePrioritization, deriveCandidates, prioritize } from './agents.js';
 import { generateAnalysisProgram, generateDefenseNarrative, streamDefenseNarrative } from './ai.js';
+import reasoningModule from './reasoningAgent.js';
+const { enrichCandidates } = reasoningModule;
 import { executeInSandbox } from './sandbox.js';
 
 const allowedOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim()).filter(Boolean);
@@ -32,10 +34,11 @@ function messageFor(error) {
   return error instanceof Error ? error.message : 'ARIA could not complete that request.';
 }
 
-export function createApp({ merchantData = createSyntheticMerchantData(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, rateLimitMaximum = 10, defenseRateLimitMaximum = 20 } = {}) {
+export function createApp({ merchantData = createSyntheticMerchantData(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, reasoningEnrichment = enrichCandidates, rateLimitMaximum = 10, defenseRateLimitMaximum = 20 } = {}) {
   const app = express();
   const analysisRequests = new Map();
   const defenseRequests = new Map();
+  const briefEnrichmentCache = new Map();
 
   function rateLimit(requests, maximumRequests, errorMessage) {
     return function applyRateLimit(request, response, next) {
@@ -63,10 +66,29 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
 
   app.get('/health', (_request, response) => response.json({ status: 'ok', sandbox: 'isolated-vm' }));
   app.get('/api/merchants', (_request, response) => response.json({ merchants: demoMerchants }));
-  app.get('/api/brief', (request, response) => {
+  app.get('/api/brief', async (request, response) => {
     try {
       const { merchant, events } = resolveMerchant(merchantData, request.query.merchant);
-      return response.json({ merchant, merchants: demoMerchants, simulatedAt: demoReferenceDate, generatedAt: new Date().toISOString(), actions: createMorningBrief(events), prioritySummary: summarizePrioritization(events), ledger: createTrustLedger(events) });
+      // derive deterministic candidates first
+      const baseCandidates = deriveCandidates(events);
+      let enrichedCandidates = baseCandidates;
+      let reasoningStatus = 'unavailable';
+      try {
+        const enrichment = await reasoningEnrichment({ candidates: baseCandidates, events });
+        if (enrichment && enrichment.reasoningStatus === 'ok' && Array.isArray(enrichment.candidates)) {
+          enrichedCandidates = enrichment.candidates;
+          reasoningStatus = 'ok';
+          briefEnrichmentCache.set(merchant.id, enrichedCandidates);
+        } else {
+          briefEnrichmentCache.delete(merchant.id);
+        }
+      } catch (err) {
+        // defense-in-depth: ensure failures from enrichment don't break the brief
+        reasoningStatus = 'unavailable';
+        briefEnrichmentCache.delete(merchant.id);
+      }
+      const actions = prioritize(enrichedCandidates);
+      return response.json({ merchant, merchants: demoMerchants, simulatedAt: demoReferenceDate, generatedAt: new Date().toISOString(), actions, prioritySummary: summarizePrioritization(events), ledger: createTrustLedger(events), reasoningStatus });
     } catch (error) {
       return response.status(404).json({ error: messageFor(error) });
     }
@@ -74,8 +96,26 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
   app.post('/api/defense', defenseRateLimit, async (request, response) => {
     try {
       if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
-      const { events } = resolveMerchant(merchantData, request.body.merchantId);
+      const { merchant, events } = resolveMerchant(merchantData, request.body.merchantId);
       const defense = rederiveDefenseEvidence(events, request.body.insightId);
+      const providedReasoning = typeof request.body?.reasoning === 'string' ? request.body.reasoning : null;
+      const providedCrossSignals = Array.isArray(request.body?.crossSignals) ? request.body.crossSignals : null;
+      let cachedReasoning = null;
+      let cachedCrossSignals = null;
+      if (!providedReasoning && briefEnrichmentCache.has(merchant.id)) {
+        const cachedCandidate = briefEnrichmentCache.get(merchant.id).find((c) => c.id === defense.insightId);
+        if (cachedCandidate) {
+          cachedReasoning = cachedCandidate.reasoning;
+          cachedCrossSignals = cachedCandidate.crossSignals;
+        }
+      }
+      if (providedReasoning || cachedReasoning) {
+        defense.evidence = {
+          ...defense.evidence,
+          enrichedReasoning: providedReasoning ?? cachedReasoning,
+          crossSignals: providedCrossSignals ?? cachedCrossSignals ?? []
+        };
+      }
       const narrative = await defenseNarrative(defense);
       return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
     } catch (error) {
@@ -87,8 +127,26 @@ export function createApp({ merchantData = createSyntheticMerchantData(), analys
   app.post('/api/defense/stream', defenseRateLimit, async (request, response) => {
     try {
       if (typeof request.body?.insightId !== 'string') return response.status(400).json({ error: 'Choose a surfaced insight to re-check.' });
-      const { events } = resolveMerchant(merchantData, request.body.merchantId);
+      const { merchant, events } = resolveMerchant(merchantData, request.body.merchantId);
       const defense = rederiveDefenseEvidence(events, request.body.insightId);
+      const providedReasoning = typeof request.body?.reasoning === 'string' ? request.body.reasoning : null;
+      const providedCrossSignals = Array.isArray(request.body?.crossSignals) ? request.body.crossSignals : null;
+      let cachedReasoning = null;
+      let cachedCrossSignals = null;
+      if (!providedReasoning && briefEnrichmentCache.has(merchant.id)) {
+        const cachedCandidate = briefEnrichmentCache.get(merchant.id).find((c) => c.id === defense.insightId);
+        if (cachedCandidate) {
+          cachedReasoning = cachedCandidate.reasoning;
+          cachedCrossSignals = cachedCandidate.crossSignals;
+        }
+      }
+      if (providedReasoning || cachedReasoning) {
+        defense.evidence = {
+          ...defense.evidence,
+          enrichedReasoning: providedReasoning ?? cachedReasoning,
+          crossSignals: providedCrossSignals ?? cachedCrossSignals ?? []
+        };
+      }
       const controller = new AbortController();
       request.on('aborted', () => controller.abort());
       response.status(200).set({

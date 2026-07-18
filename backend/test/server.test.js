@@ -47,6 +47,28 @@ test('brief returns two selectable merchants and a derived trust ledger', async 
   });
 });
 
+test('brief returns enriched candidates when reasoningEnrichment succeeds', async () => {
+  const reasoningEnrichment = async ({ candidates, events }) => ({ candidates: candidates.map((c) => ({ ...c, reasoning: 'model says', crossSignals: [] })), reasoningStatus: 'ok' });
+  await withServer(createTestApp({ reasoningEnrichment }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.reasoningStatus, 'ok');
+    assert.ok(payload.actions.some((action) => action.reasoning === 'model says'));
+  });
+});
+
+test('brief degrades gracefully when reasoningEnrichment throws', async () => {
+  const reasoningEnrichment = async () => { throw new Error('enrichment failed'); };
+  await withServer(createTestApp({ reasoningEnrichment }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.reasoningStatus, 'unavailable');
+    assert.ok(Array.isArray(payload.actions) && payload.actions.length >= 0);
+  });
+});
+
 test('defense stream emits metadata, token deltas, and completion', async () => {
   await withServer(createTestApp(), async (baseUrl) => {
     const response = await post(baseUrl, '/api/defense/stream', { merchantId: 'aisha-textiles', insightId: 'churn-cust-amara' });
@@ -110,6 +132,101 @@ test('both defense routes share a clean per-client rate limit', async () => {
     assert.equal(first.status, 200);
     assert.equal(second.status, 429);
     assert.match((await second.json()).error, /re-check another action/);
+  });
+});
+
+test('brief populates cache and defense does not re-run enrichment', async () => {
+  let calls = 0;
+  const reasoningEnrichment = async ({ candidates }) => {
+    calls += 1;
+    return { candidates: candidates.map((c) => ({ ...c, reasoning: 'cached', crossSignals: [] })), reasoningStatus: 'ok' };
+  };
+  await withServer(createTestApp({ reasoningEnrichment }), async (baseUrl) => {
+    const briefResp = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
+    const brief = await briefResp.json();
+    assert.equal(briefResp.status, 200);
+    // pick an insight id from the brief
+    const insightId = brief.actions[0].id;
+    const defenseResp = await post(baseUrl, '/api/defense', { merchantId: 'kola-mobile', insightId });
+    assert.equal(defenseResp.status, 200);
+    // enrichment should have been called exactly once (during brief)
+    assert.equal(calls, 1);
+  });
+});
+
+test('defenseNarrative receives enriched crossSignals from cache', async () => {
+  let recordedDefense = null;
+  const reasoningEnrichment = async ({ candidates }) => ({ candidates: candidates.map((c) => ({ ...c, reasoning: 'from-model', crossSignals: [{ signal: 'x' }] })), reasoningStatus: 'ok' });
+  const defenseNarrative = async (defense) => { recordedDefense = defense; return 'ok'; };
+  await withServer(createTestApp({ reasoningEnrichment, defenseNarrative }), async (baseUrl) => {
+    const briefResp = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
+    const brief = await briefResp.json();
+    assert.equal(briefResp.status, 200);
+    const insightId = brief.actions[0].id;
+    const defenseResp = await post(baseUrl, '/api/defense', { merchantId: 'kola-mobile', insightId });
+    assert.equal(defenseResp.status, 200);
+    assert.ok(recordedDefense, 'defenseNarrative was not called');
+    assert.ok(Array.isArray(recordedDefense.evidence.crossSignals), 'crossSignals not present on defense.evidence');
+    assert.equal(recordedDefense.evidence.crossSignals[0].signal, 'x');
+  });
+});
+
+test('defense stream receives cached crossSignals when brief used default merchant', async () => {
+  let recordedStreamInput = null;
+  const reasoningEnrichment = async ({ candidates }) => ({
+    candidates: candidates.map((c) => ({ ...c, reasoning: 'from-model', crossSignals: [{ signal: 'stream-x' }] })),
+    reasoningStatus: 'ok'
+  });
+  const defenseStream = async function* (defense) {
+    recordedStreamInput = defense;
+    yield 'ok';
+  };
+
+  await withServer(createTestApp({ reasoningEnrichment, defenseStream }), async (baseUrl) => {
+    // call brief with no merchant query param to use default merchant
+    const briefResp = await fetch(`${baseUrl}/api/brief`);
+    const brief = await briefResp.json();
+    assert.equal(briefResp.status, 200);
+    const merchantId = brief.merchant.id;
+    const insightId = brief.actions[0].id;
+    const streamResp = await post(baseUrl, '/api/defense/stream', { merchantId, insightId });
+    const body = await streamResp.text();
+    assert.equal(streamResp.status, 200);
+    // ensure defenseStream received enriched crossSignals from cache
+    assert.ok(recordedStreamInput, 'defenseStream was not invoked');
+    assert.ok(Array.isArray(recordedStreamInput.evidence.crossSignals));
+    assert.equal(recordedStreamInput.evidence.crossSignals[0].signal, 'stream-x');
+    assert.match(body, /event: meta/);
+  });
+});
+
+test('defense stream does not re-run enrichment when cache present (explicit merchant id)', async () => {
+  let recordedStreamInput = null;
+  let calls = 0;
+  const reasoningEnrichment = async ({ candidates }) => {
+    calls += 1;
+    return {
+      candidates: candidates.map((c) => ({ ...c, reasoning: 'from-model', crossSignals: [{ signal: 'cached' }] })),
+      reasoningStatus: 'ok'
+    };
+  };
+  const defenseStream = async function* (defense) {
+    recordedStreamInput = defense;
+    yield 'ok';
+  };
+
+  await withServer(createTestApp({ reasoningEnrichment, defenseStream }), async (baseUrl) => {
+    const briefResp = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
+    const brief = await briefResp.json();
+    assert.equal(briefResp.status, 200);
+    const merchantId = brief.merchant.id;
+    const insightId = brief.actions[0].id;
+    const streamResp = await post(baseUrl, '/api/defense/stream', { merchantId, insightId });
+    assert.equal(streamResp.status, 200);
+    // enrichment should have been called only once (during brief)
+    assert.equal(calls, 1);
+    assert.ok(recordedStreamInput, 'defenseStream was not invoked');
+    assert.equal(recordedStreamInput.evidence.crossSignals[0].signal, 'cached');
   });
 });
 

@@ -4,7 +4,7 @@ const defaultModel = process.env.OPENAI_MODEL ?? 'gpt-5.6';
 const analysisInstructions = `You are ARIA's Codex Analysis Agent. Generate one small, self-contained JavaScript program that answers the merchant's business question using only the supplied structured events.
 
 Return JavaScript source only: no Markdown fences, prose, imports, require calls, network access, filesystem access, process access, dynamic evaluation, timers, or functions that access globals. The program must begin with \`const events = [\` and must emit exactly one JSON value through \`console.log(JSON.stringify(...))\`. Use only standard JavaScript data transforms and the supplied event fields.`;
-const defenseInstructions = `You are ARIA's Defense Agent for a fictional Lagos fabric merchant. Explain the supplied current evidence in one concise, plain-language paragraph. Describe only facts supported by the evidence, distinguish risk from certainty, and explain why the suggested action is timely. Do not mention prompts, models, cached text, or hidden insights.`;
+const defenseInstructions = `You are ARIA's Defense Agent for a fictional Lagos fabric merchant. Explain the supplied current evidence in one concise, plain-language paragraph. If evidence includes enrichedReasoning or crossSignals, incorporate that cross-signal context as supporting context for why this insight is timely. Describe only facts supported by the evidence, distinguish risk from certainty, and explain why the suggested action is timely. Do not mention prompts, models, cached text, or hidden insights.`;
 
 function outputText(response) {
   const text = response?.output_text?.trim();
