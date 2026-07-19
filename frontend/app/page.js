@@ -186,8 +186,8 @@ export default function Home() {
   const now = useMemo(() => simulatedAt ? new Date(simulatedAt) : null, [simulatedAt]);
   const animatedDiscardCount = useCountUp(summary.opportunitiesDiscarded);
   const lagosWeekday = now ? new Intl.DateTimeFormat('en-GB', { weekday: 'long', timeZone: 'Africa/Lagos' }).format(now).toUpperCase() : 'TODAY';
-  const lagosHour = now ? Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: 'Africa/Lagos' }).format(now)) : 9;
-  const greeting = lagosHour < 12 ? 'Morning' : lagosHour < 17 ? 'Afternoon' : 'Evening';
+  const lagosHour = now ? Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: 'Africa/Lagos' }).format(now)) : null;
+  const greeting = lagosHour === null ? null : lagosHour < 12 ? 'Morning' : lagosHour < 17 ? 'Afternoon' : 'Evening';
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('aria-theme');
@@ -336,7 +336,7 @@ export default function Home() {
   }
 
   const copy = pidgin ? {
-    greeting: `Good ${greeting}, ${merchant.name}.`,
+    greeting: `${greeting ? `Good ${greeting}` : 'Hello'}, ${merchant.name}.`,
     subhead: 'Na only the things wey need your attention today.',
     brief: `Wetin need ${merchant.name} attention today`,
     briefNote: `This week, ${summary.signalsRead} signals land. ${summary.opportunitiesDiscarded} no need ${merchant.name} time.`,
@@ -344,7 +344,7 @@ export default function Home() {
     question: 'Ask ARIA anything about this business',
     helper: 'Try sales this week or customers wey don quiet.'
   } : {
-    greeting: `Good ${greeting}, ${merchant.name}.`,
+    greeting: `${greeting ? `Good ${greeting}` : 'Hello'}, ${merchant.name}.`,
     subhead: 'Here’s what matters today.',
     brief: `What needs ${merchant.name}’s attention today`,
     briefNote: `This week, ${summary.signalsRead} signals came in. ${summary.opportunitiesDiscarded} did not need ${merchant.name}’s time.`,
