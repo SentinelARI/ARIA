@@ -1,4 +1,9 @@
 const day = 86_400_000;
+// Priority thresholds and scoring formula confirmed by product (Daniel) on 2026-07-18.
+// These are the final product thresholds to determine which candidates are surfaced:
+// - minimum `urgency`: 70
+// - minimum `valueNaira`: 50,000
+// Do NOT treat these as placeholders; they are the agreed specification.
 const priorityThresholds = Object.freeze({ urgency: 70, valueNaira: 50_000 });
 
 function clamp(value, minimum, maximum) {
@@ -223,6 +228,9 @@ export function deriveCandidates(events, referenceDate = new Date('2026-07-16T07
   return candidates;
 }
 
+// Prioritization uses Daniel's confirmed scoring formula (2026-07-18):
+// priorityScore = urgency * 0.45 + min(valueNaira / 4000, 45) + confidence * 0.1
+// Surface the top 3 candidates that meet the product thresholds above.
 export function prioritize(candidates) {
   return candidates
     .filter((candidate) => candidate.actionability === 1 && !candidate.resolved && candidate.urgency >= priorityThresholds.urgency && candidate.valueNaira >= priorityThresholds.valueNaira)
