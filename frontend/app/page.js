@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
-const demoReferenceDate = '2026-07-16T07:00:00.000Z';
 
 const fallbackMerchants = [
   { id: 'aisha-textiles', name: 'Aisha', business: 'Aisha Textiles', location: 'Yaba, Lagos', sector: 'Fabric retail' },
@@ -169,7 +168,7 @@ export default function Home() {
   const [merchantId, setMerchantId] = useState(fallbackMerchants[0].id);
   const [summary, setSummary] = useState(fallbackSummary);
   const [ledger, setLedger] = useState([]);
-  const [simulatedAt, setSimulatedAt] = useState(demoReferenceDate);
+  const [simulatedAt, setSimulatedAt] = useState(null);
   const [briefLoading, setBriefLoading] = useState(true);
   const [briefError, setBriefError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
@@ -184,10 +183,10 @@ export default function Home() {
   const [pidgin, setPidgin] = useState(false);
   const [activeAgent, setActiveAgent] = useState('Priority');
   const defenseController = useRef(null);
-  const now = useMemo(() => new Date(simulatedAt), [simulatedAt]);
+  const now = useMemo(() => simulatedAt ? new Date(simulatedAt) : null, [simulatedAt]);
   const animatedDiscardCount = useCountUp(summary.opportunitiesDiscarded);
-  const lagosWeekday = new Intl.DateTimeFormat('en-GB', { weekday: 'long', timeZone: 'Africa/Lagos' }).format(now).toUpperCase();
-  const lagosHour = Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: 'Africa/Lagos' }).format(now));
+  const lagosWeekday = now ? new Intl.DateTimeFormat('en-GB', { weekday: 'long', timeZone: 'Africa/Lagos' }).format(now).toUpperCase() : 'TODAY';
+  const lagosHour = now ? Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: 'Africa/Lagos' }).format(now)) : 9;
   const greeting = lagosHour < 12 ? 'Morning' : lagosHour < 17 ? 'Afternoon' : 'Evening';
 
   useEffect(() => {
@@ -213,12 +212,13 @@ export default function Home() {
         setMerchants(brief.merchants);
         setSummary(brief.prioritySummary);
         setLedger(brief.ledger);
-        setSimulatedAt(brief.simulatedAt ?? demoReferenceDate);
+        setSimulatedAt(brief.simulatedAt ?? new Date().toISOString());
         setActiveAgent('Priority');
       })
       .catch((error) => {
         if (error.name !== 'AbortError') {
           setBriefError('Couldn’t reach ARIA’s live data. Showing example brief.');
+          setSimulatedAt(new Date().toISOString());
           setActiveAgent('Priority');
         }
       })

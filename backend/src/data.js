@@ -1,5 +1,5 @@
 const day = 86_400_000;
-export const demoReferenceDate = '2026-07-16T07:00:00.000Z';
+export const demoReferenceDate = new Date();
 const now = new Date(demoReferenceDate);
 
 export const demoMerchants = Object.freeze([

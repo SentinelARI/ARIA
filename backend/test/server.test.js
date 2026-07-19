@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createApp } from '../src/server.js';
 import { enrichCandidates } from '../src/reasoningAgent.js';
+import { demoReferenceDate } from '../src/data.js';
 
 const validProgram = 'const events = []; console.log(JSON.stringify({ ok: true }));';
 
@@ -44,7 +45,7 @@ test('brief returns two selectable merchants and a derived trust ledger', async 
     assert.equal(payload.merchants.length, 2);
     assert.ok(payload.ledger.length >= 5);
     assert.ok(payload.actions.some((action) => action.kind === 'supplier-delay'));
-    assert.equal(payload.simulatedAt, '2026-07-16T07:00:00.000Z');
+    assert.equal(payload.simulatedAt, demoReferenceDate.toISOString());
   });
 });
 

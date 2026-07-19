@@ -25,3 +25,8 @@ test('lime on the dark hero and gold on paper meet WCAG AA contrast', () => {
   assert.ok(contrastRatio(colorToken('--lime'), '#12392e') >= 4.5, 'Lime text on the hero must meet AA contrast.');
   assert.ok(contrastRatio(colorToken('--gold'), colorToken('--paper')) >= 4.5, 'Gold text on paper must meet AA contrast.');
 });
+
+test('light hero uses contrast-safe theme tokens', () => {
+  assert.match(css, /:root:not\(\[data-theme='dark'\]\) \.hero/);
+  assert.ok(contrastRatio(colorToken('--moss'), colorToken('--paper')) >= 4.5, 'Moss text on the light hero must meet AA contrast.');
+});

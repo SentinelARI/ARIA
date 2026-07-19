@@ -1,3 +1,5 @@
+import { demoReferenceDate } from './data.js';
+
 const day = 86_400_000;
 // Priority thresholds and scoring formula confirmed by product (Daniel) on 2026-07-18.
 // These are the final product thresholds to determine which candidates are surfaced:
@@ -216,7 +218,7 @@ function deriveResolvedPaymentCandidate(events) {
   };
 }
 
-export function deriveCandidates(events, referenceDate = new Date('2026-07-16T07:00:00.000Z')) {
+export function deriveCandidates(events, referenceDate = demoReferenceDate) {
   const candidates = [
     ...deriveChurnCandidates(events, referenceDate),
     ...derivePricingCandidates(events),

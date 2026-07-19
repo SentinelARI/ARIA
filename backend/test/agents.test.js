@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSyntheticEvents } from '../src/data.js';
+import { createSyntheticEvents, demoReferenceDate } from '../src/data.js';
 import { createMorningBrief, createTrustLedger, deriveCandidates, prioritize, rederiveDefenseEvidence, summarizePrioritization } from '../src/agents.js';
 
 test('priority agent surfaces three actionable insights and discards suppressed findings', () => {
@@ -34,7 +34,7 @@ test('defense evidence is re-derived from current structured events', () => {
 test('confidence scales with the strength and sample size of real evidence', () => {
   const events = createSyntheticEvents();
   const baseChurn = deriveCandidates(events).find((candidate) => candidate.kind === 'churn-risk');
-  const strongerChurn = deriveCandidates(events, new Date('2026-07-28T07:00:00.000Z')).find((candidate) => candidate.kind === 'churn-risk');
+  const strongerChurn = deriveCandidates(events, new Date(demoReferenceDate.getTime() + 12 * 86_400_000)).find((candidate) => candidate.kind === 'churn-risk');
   const pricing = deriveCandidates(events).find((candidate) => candidate.kind === 'pricing-anomaly');
   const inventory = deriveCandidates(events).find((candidate) => candidate.kind === 'inventory');
   assert.ok(strongerChurn.confidence > baseChurn.confidence);
