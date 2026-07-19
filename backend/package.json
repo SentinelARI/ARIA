@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --no-node-snapshot --watch src/server.js",
-    "start": "node --no-node-snapshot src/server.js",
+    "dev": "node --no-node-snapshot --env-file=.env --watch src/server.js",
+    "start": "node --no-node-snapshot --env-file=.env src/server.js",
     "test": "node --no-node-snapshot --test"
   },
   "dependencies": {

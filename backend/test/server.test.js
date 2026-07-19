@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createApp } from '../src/server.js';
+import { enrichCandidates } from '../src/reasoningAgent.js';
 
 const validProgram = 'const events = []; console.log(JSON.stringify({ ok: true }));';
 
@@ -47,13 +48,23 @@ test('brief returns two selectable merchants and a derived trust ledger', async 
   });
 });
 
-test('brief returns enriched candidates when reasoningEnrichment succeeds', async () => {
-  const reasoningEnrichment = async ({ candidates, events }) => ({ candidates: candidates.map((c) => ({ ...c, reasoning: 'model says', crossSignals: [] })), reasoningStatus: 'ok' });
+test('brief surfaces actions after real successful reasoning enrichment', async () => {
+  const client = {
+    responses: {
+      create: async ({ input }) => {
+        const { candidates } = JSON.parse(input);
+        return { output_text: JSON.stringify(candidates.map(({ id }) => ({ id, reasoning: 'model says', crossSignals: [] }))) };
+      }
+    }
+  };
+  const reasoningEnrichment = ({ candidates, events }) => enrichCandidates({ candidates, events, client });
   await withServer(createTestApp({ reasoningEnrichment }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
     const payload = await response.json();
     assert.equal(response.status, 200);
     assert.equal(payload.reasoningStatus, 'ok');
+    assert.ok(payload.actions.length > 0);
+    assert.ok(payload.actions.every((action) => action.actionability === 1 && action.urgency >= 70 && action.valueNaira >= 50_000));
     assert.ok(payload.actions.some((action) => action.reasoning === 'model says'));
   });
 });

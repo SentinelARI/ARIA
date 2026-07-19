@@ -46,6 +46,7 @@ export async function enrichCandidates({ candidates, events, client, model = def
   const structured = structuredEvents(events);
   const structuredCandidates = (candidates || []).map(({ rawText, ...c }) => c);
   const candidateIds = structuredCandidates.map((c) => c.id);
+  const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const eventIds = structured.map((e) => e.id).filter(Boolean);
 
   if (!clientUsed) {
@@ -77,7 +78,14 @@ export async function enrichCandidates({ candidates, events, client, model = def
       parsed = JSON.parse(text);
       validateShape(parsed, candidateIds, eventIds);
       // success
-      return { candidates: parsed.map(({ id, reasoning, crossSignals }) => ({ id, reasoning, crossSignals })), reasoningStatus: 'ok' };
+      return {
+        candidates: parsed.map(({ id, reasoning, crossSignals }) => {
+          const candidate = candidatesById.get(id);
+          if (!candidate) throw new ValidationError(`Unknown candidate id: ${id}`);
+          return { ...candidate, reasoning, crossSignals };
+        }),
+        reasoningStatus: 'ok'
+      };
     } catch (err) {
       lastError = err;
       if (attempt === 1) break; // second attempt already

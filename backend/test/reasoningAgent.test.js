@@ -21,6 +21,53 @@ test('enrichCandidates - successful single-call enrichment', async () => {
   assert.deepEqual(r1.crossSignals, ['c2', 'e1']);
 });
 
+test('enrichCandidates preserves every deterministic candidate field when enrichment succeeds', async () => {
+  const candidates = [
+    {
+      id: 'c1',
+      kind: 'churn-risk',
+      urgency: 92,
+      valueNaira: 186000,
+      actionability: 1,
+      resolved: false,
+      confidence: 86,
+      title: 'Amara may be drifting away',
+      action: 'Send a personal check-in.',
+      customerName: 'Amara Okafor',
+      evidence: { latestGap: 27, expectedCadence: 12 }
+    },
+    {
+      id: 'c2',
+      kind: 'supplier-delay',
+      urgency: 90,
+      valueNaira: 420000,
+      actionability: 1,
+      resolved: false,
+      confidence: 90,
+      title: 'Delivery is late',
+      action: 'Contact the supplier.',
+      customerName: null,
+      evidence: { overdueDays: 4 }
+    }
+  ];
+  const events = [{ id: 'e1' }];
+  const client = {
+    responses: {
+      create: async () => ({ output_text: JSON.stringify([
+        { id: 'c1', reasoning: 'The late, smaller order needs attention.', crossSignals: ['e1'] },
+        { id: 'c2', reasoning: 'The overdue delivery risks stock availability.', crossSignals: [] }
+      ]) })
+    }
+  };
+
+  const result = await enrichCandidates({ candidates, events, client });
+
+  assert.deepEqual(result.candidates, [
+    { ...candidates[0], reasoning: 'The late, smaller order needs attention.', crossSignals: ['e1'] },
+    { ...candidates[1], reasoning: 'The overdue delivery risks stock availability.', crossSignals: [] }
+  ]);
+});
+
 test('enrichCandidates - retry on invalid JSON then succeed', async () => {
   const candidates = [{ id: 'c1' }];
   const events = [{ id: 'e1' }];
