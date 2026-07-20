@@ -4,14 +4,15 @@ ARIA is a standing intelligence layer for two fictional Lagos merchants: Aisha T
 
 ## What works
 
-- Twelve weeks of synthetic, structured data for two merchants in different sectors.
+- Twelve weeks of synthetic, structured data for two merchants in different sectors, with richer repeat-buyer histories and merchant records.
+- A request-time Lagos reference clock: every brief and Defense re-derivation receives a fresh, internally consistent synthetic timeline, and the UI refreshes when the Lagos calendar day changes.
 - Deterministic detection for churn risk, pricing anomalies, supplier delays, inventory windows, and lower-priority sales opportunities.
 - A Priority Agent with actionability, urgency, value, and resolution gates. It discards suppressed findings rather than storing a hidden queue.
 - A real trust ledger derived from structured merchant-history events, not hardcoded UI rows.
 - A live OpenAI Defense Agent that re-derives current evidence for every request and streams its fresh explanation token-by-token to the UI with SSE.
 - A live OpenAI Analysis Agent using the Responses API and `gpt-5.6` by default. It receives a business question and structured events, then produces a fresh JavaScript analysis program.
 - A Railway-compatible `isolated-vm` execution boundary that limits each program to 128 MB and five seconds without exposing Node, network, filesystem, or process capabilities.
-- A responsive Next.js Morning Brief with merchant switching, light/dark mode, optional Pidgin copy, accessible inline feedback, motion that respects reduced-motion preferences, and browser voice playback.
+- A responsive Next.js Morning Brief with merchant switching, light/dark mode, complete English and Nigerian Pidgin copy, accessible inline feedback, motion that respects reduced-motion preferences, and locale-aware browser voice playback.
 
 ## Run locally
 
@@ -40,5 +41,7 @@ The current event adapter, rate limiter, and trust history are in-memory demo sh
 ## Test coverage
 
 `npm test` covers priority discard behavior, current-evidence re-derivation, two merchant scenarios, trust-ledger derivation, OpenAI request and streaming contracts through mocked SDK responses, SSE response framing, hostile query handling, proxy-aware analysis and Defense rate limits, retired public metrics, generated-code validation, direct isolate capability-escape attempts, and WCAG AA checks for the key lime/gold color pairs.
+
+The date and locale tests also verify that a brief rebases on the current request time, a Lagos day rollover produces a new timeline, and every surfaced action and ledger entry carries structured copy for both English and Nigerian Pidgin. Add future languages only with a native-speaker review of their full copy set; do not publish a partial toggle.
 
 GitHub Actions installs locked dependencies, scans tracked source for credential-shaped values, runs the full test suite, and builds the frontend on every pull request and push to `main`.

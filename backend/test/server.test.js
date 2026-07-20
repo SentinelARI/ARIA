@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createApp } from '../src/server.js';
 import { enrichCandidates } from '../src/reasoningAgent.js';
-import { demoReferenceDate } from '../src/data.js';
 
 const validProgram = 'const events = []; console.log(JSON.stringify({ ok: true }));';
 
@@ -37,7 +36,8 @@ function post(baseUrl, path, body, headers = {}) {
 }
 
 test('brief returns two selectable merchants and a derived trust ledger', async () => {
-  await withServer(createTestApp(), async (baseUrl) => {
+  const referenceDate = new Date('2026-07-20T12:00:00.000Z');
+  await withServer(createTestApp({ clock: () => referenceDate }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`);
     const payload = await response.json();
     assert.equal(response.status, 200);
@@ -45,7 +45,36 @@ test('brief returns two selectable merchants and a derived trust ledger', async 
     assert.equal(payload.merchants.length, 2);
     assert.ok(payload.ledger.length >= 5);
     assert.ok(payload.actions.some((action) => action.kind === 'supplier-delay'));
-    assert.equal(payload.simulatedAt, demoReferenceDate.toISOString());
+    assert.equal(payload.simulatedAt, referenceDate.toISOString());
+  });
+});
+
+test('brief rebuilds the synthetic timeline from the current request clock', async () => {
+  const dates = [new Date('2026-07-19T12:00:00.000Z'), new Date('2026-07-20T12:00:00.000Z')];
+  let clockCalls = 0;
+  await withServer(createTestApp({ clock: () => dates[Math.min(clockCalls++, dates.length - 1)] }), async (baseUrl) => {
+    const first = await (await fetch(`${baseUrl}/api/brief?merchant=aisha-textiles`)).json();
+    const second = await (await fetch(`${baseUrl}/api/brief?merchant=aisha-textiles`)).json();
+    assert.equal(first.simulatedAt, dates[0].toISOString());
+    assert.equal(second.simulatedAt, dates[1].toISOString());
+    assert.equal(new Date(second.ledger[0].occurredAt).getTime() - new Date(first.ledger[0].occurredAt).getTime(), 86_400_000);
+  });
+});
+
+test('Pidgin API errors include a stable code and localized message', async () => {
+  await withServer(createTestApp(), async (baseUrl) => {
+    const response = await post(baseUrl, '/api/analysis', { locale: 'pg', question: '' });
+    const payload = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(payload.errorCode, 'invalidQuestion');
+    assert.match(payload.error, /business question wey get/);
+  });
+});
+
+test('analysis accepts a Pidgin business question', async () => {
+  await withServer(createTestApp(), async (baseUrl) => {
+    const response = await post(baseUrl, '/api/analysis', { locale: 'pg', question: 'Which people don stop to buy?' });
+    assert.equal(response.status, 200);
   });
 });
 
@@ -163,6 +192,21 @@ test('brief populates cache and defense does not re-run enrichment', async () =>
     assert.equal(defenseResp.status, 200);
     // enrichment should have been called exactly once (during brief)
     assert.equal(calls, 1);
+  });
+});
+
+test('defense ignores enrichment cached for an earlier Lagos day', async () => {
+  const dates = [new Date('2026-07-19T12:00:00.000Z'), new Date('2026-07-20T12:00:00.000Z')];
+  let clockCalls = 0;
+  let recordedDefense = null;
+  const reasoningEnrichment = async ({ candidates }) => ({ candidates: candidates.map((candidate) => ({ ...candidate, reasoning: 'yesterday cache', crossSignals: [] })), reasoningStatus: 'ok' });
+  const defenseNarrative = async (defense) => { recordedDefense = defense; return 'ok'; };
+  await withServer(createTestApp({ clock: () => dates[Math.min(clockCalls++, dates.length - 1)], reasoningEnrichment, defenseNarrative }), async (baseUrl) => {
+    const brief = await (await fetch(`${baseUrl}/api/brief?merchant=kola-mobile`)).json();
+    const response = await post(baseUrl, '/api/defense', { merchantId: 'kola-mobile', insightId: brief.actions[0].id });
+    assert.equal(response.status, 200);
+    assert.ok(recordedDefense);
+    assert.equal('enrichedReasoning' in recordedDefense.evidence, false);
   });
 });
 

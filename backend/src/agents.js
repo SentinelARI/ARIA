@@ -1,5 +1,3 @@
-import { demoReferenceDate } from './data.js';
-
 const day = 86_400_000;
 // Priority thresholds and scoring formula confirmed by product (Daniel) on 2026-07-18.
 // These are the final product thresholds to determine which candidates are surfaced:
@@ -69,6 +67,7 @@ function deriveChurnCandidates(events, referenceDate) {
         title: `${customerName} may be drifting away`,
         action: `Send ${firstName} a personal check-in and show the latest ${productLabel(latest.product)} arrivals.`,
         draftMessage: `Hi ${firstName}, we just received fresh ${productLabel(latest.product)} options I think you would like. Should I send you a quick video before they go?`,
+        copy: { key: 'churnRisk', params: { customerName, firstName, product: productLabel(latest.product) } },
         actionability: 1,
         urgency: 92,
         valueNaira: Math.round(historicalAmount),
@@ -113,6 +112,7 @@ function derivePricingCandidates(events) {
         title: `Review ${firstName}’s ${productLabel(product)} price`,
         action: `Check whether ${firstName}’s repeat ${productLabel(product)} price is still intentional before the next order.`,
         draftMessage: `Hi ${firstName}, I am reviewing our current ${productLabel(product)} prices before your next order. Should I reserve your usual quantity while I confirm the best option?`,
+        copy: { key: 'pricingAnomaly', params: { firstName, product: productLabel(product) } },
         actionability: 1,
         urgency: 84,
         // Project three expected repeat orders to estimate near-term recoverable pricing value.
@@ -140,6 +140,7 @@ function deriveSupplierDelayCandidates(events, referenceDate) {
         title: `${event.product} delivery is ${overdueDays} days late`,
         action: `Contact ${event.supplierName} today and confirm a delivery date before the ${event.product} gap affects repeat buyers.`,
         draftMessage: `Hello ${event.supplierName}, our ${event.product} delivery is now overdue. Please confirm the delivery date today so we can plan stock for customers.`,
+        copy: { key: 'supplierDelay', params: { supplierName: event.supplierName, product: event.product, overdueDays } },
         actionability: 1,
         urgency: 90,
         valueNaira: event.amountNaira,
@@ -167,6 +168,7 @@ function deriveInventoryCandidate(events, referenceDate) {
     title: `Turn yesterday’s ${product} restock into sales`,
     action: `Share a short arrivals update with repeat ${product} buyers before the weekend.`,
     draftMessage: `New ${product} stock just landed. I saved options that match what you normally pick — would you like a quick video?`,
+    copy: { key: 'inventory', params: { product } },
     actionability: 1,
     urgency: 76,
     valueNaira: restock.amountNaira,
@@ -188,6 +190,7 @@ function deriveSalesOpportunity(events) {
     title: `Create a weekend ${productLabel(latestProduct)} bundle offer`,
     action: `Bundle three slower-moving ${productLabel(latestProduct)} options and share the offer with recent buyers.`,
     draftMessage: `I put together a weekend ${productLabel(latestProduct)} bundle with three options at a better price. Would you like me to reserve one?`,
+    copy: { key: 'salesOpportunity', params: { product: productLabel(latestProduct) } },
     actionability: 1,
     urgency: 65,
     valueNaira: 195000,
@@ -209,6 +212,7 @@ function deriveResolvedPaymentCandidate(events) {
     title: `Follow up on ${payment.customerName}’s payment`,
     action: 'No action needed.',
     draftMessage: '',
+    copy: { key: 'payment', params: { customerName: payment.customerName } },
     actionability: 0,
     urgency: 68,
     valueNaira: payment.amountNaira,
@@ -218,7 +222,7 @@ function deriveResolvedPaymentCandidate(events) {
   };
 }
 
-export function deriveCandidates(events, referenceDate = demoReferenceDate) {
+export function deriveCandidates(events, referenceDate = new Date()) {
   const candidates = [
     ...deriveChurnCandidates(events, referenceDate),
     ...derivePricingCandidates(events),
@@ -241,12 +245,12 @@ export function prioritize(candidates) {
     .slice(0, 3);
 }
 
-export function createMorningBrief(events) {
-  return prioritize(deriveCandidates(events));
+export function createMorningBrief(events, referenceDate = new Date()) {
+  return prioritize(deriveCandidates(events, referenceDate));
 }
 
-export function summarizePrioritization(events) {
-  const candidates = deriveCandidates(events);
+export function summarizePrioritization(events, referenceDate = new Date()) {
+  const candidates = deriveCandidates(events, referenceDate);
   const actions = prioritize(candidates);
   return {
     signalsRead: events.length,
@@ -261,11 +265,11 @@ export function createTrustLedger(events) {
     .filter((event) => event.kind === 'merchant-action')
     .sort((left, right) => new Date(right.occurredAt) - new Date(left.occurredAt))
     .slice(0, 6)
-    .map(({ id, occurredAt, title, status }) => ({ id, occurredAt, title, status }));
+    .map(({ id, occurredAt, title, status, copy }) => ({ id, occurredAt, title, status, copy }));
 }
 
-export function rederiveDefenseEvidence(events, insightId) {
-  const candidate = deriveCandidates(events).find((item) => item.id === insightId);
+export function rederiveDefenseEvidence(events, insightId, referenceDate = new Date()) {
+  const candidate = deriveCandidates(events, referenceDate).find((item) => item.id === insightId);
   if (!candidate) throw new Error('Insight not found in the current signal set.');
   return {
     insightId,

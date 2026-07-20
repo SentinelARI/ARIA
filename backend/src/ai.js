@@ -22,11 +22,18 @@ function structuredEvents(events) {
   return events.map(({ rawText, ...event }) => event);
 }
 
-function defenseRequest({ insight, evidence, model, stream = false }) {
+function defenseInstructionsFor(locale) {
+  const language = locale === 'pg'
+    ? 'Write the final explanation in natural Nigerian Pidgin. Keep business names, customer names, product names, numbers, and dates accurate.'
+    : 'Write the final explanation in clear English.';
+  return `${defenseInstructions}\n\n${language}`;
+}
+
+function defenseRequest({ insight, evidence, locale = 'en', model, stream = false }) {
   return {
     model,
     reasoning: { effort: 'low' },
-    instructions: defenseInstructions,
+    instructions: defenseInstructionsFor(locale),
     input: JSON.stringify({ insight, evidence }),
     ...(stream ? { stream: true } : {})
   };
@@ -46,13 +53,13 @@ export async function generateAnalysisProgram({ question, events, client, model 
   return outputText(response);
 }
 
-export async function generateDefenseNarrative({ insight, evidence, client, model = defaultModel }) {
-  const response = await clientFor(client).responses.create(defenseRequest({ insight, evidence, model }));
+export async function generateDefenseNarrative({ insight, evidence, locale = 'en', client, model = defaultModel }) {
+  const response = await clientFor(client).responses.create(defenseRequest({ insight, evidence, locale, model }));
   return outputText(response);
 }
 
-export async function* streamDefenseNarrative({ insight, evidence, client, model = defaultModel, signal }) {
-  const stream = await clientFor(client).responses.create({ ...defenseRequest({ insight, evidence, model, stream: true }), signal });
+export async function* streamDefenseNarrative({ insight, evidence, locale = 'en', client, model = defaultModel, signal }) {
+  const stream = await clientFor(client).responses.create({ ...defenseRequest({ insight, evidence, locale, model, stream: true }), signal });
   let receivedText = false;
   for await (const event of stream) {
     if (event.type !== 'response.output_text.delta' || typeof event.delta !== 'string') continue;

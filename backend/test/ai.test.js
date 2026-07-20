@@ -36,6 +36,12 @@ test('defense agent requests a fresh narrative for each re-derived evidence payl
   assert.match(client.requests[0].input, /expectedCadence/);
 });
 
+test('defense agent requests Nigerian Pidgin only when the locale asks for it', async () => {
+  const client = fakeClient(['Fresh Pidgin defense copy.']);
+  await generateDefenseNarrative({ insight: { title: 'Amara may be drifting away' }, evidence: { latestGap: 19 }, locale: 'pg', model: 'test-model', client });
+  assert.match(client.requests[0].instructions, /Nigerian Pidgin/);
+});
+
 test('defense agent streams narrative deltas through the Responses API', async () => {
   const requests = [];
   const client = {
