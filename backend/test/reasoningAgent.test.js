@@ -158,3 +158,56 @@ test('enrichCandidates - single call contains all candidate and event ids', asyn
   assert.deepEqual(inputCandidateIds.sort(), ['c1', 'c2']);
   assert.deepEqual(inputEventIds.sort(), ['e1', 'e2']);
 });
+
+test('enrichCandidates falls back to Groq without losing the structured-only boundary', async () => {
+  const candidates = [{ id: 'c1', rawText: 'must not reach either model' }];
+  const events = [{ id: 'e1', rawText: 'must not reach either model' }];
+  const openai = {
+    responses: {
+      create: async () => {
+        const error = new Error('quota detail');
+        error.status = 429;
+        error.error = { code: 'insufficient_quota', type: 'insufficient_quota' };
+        throw error;
+      }
+    }
+  };
+  let groqInput = null;
+  const groq = {
+    responses: {
+      create: async ({ input }) => {
+        groqInput = JSON.parse(input);
+        return { output_text: JSON.stringify([{ id: 'c1', reasoning: 'Current event e1 supports this action.', crossSignals: ['e1'] }]) };
+      }
+    }
+  };
+
+  const result = await enrichCandidates({ candidates, events, client: openai, groqClient: groq, model: 'openai-test', groqModel: 'groq-test' });
+  assert.equal(result.reasoningStatus, 'ok');
+  assert.equal(result.candidates[0].reasoning, 'Current event e1 supports this action.');
+  assert.equal(groqInput.candidates[0].rawText, undefined);
+  assert.equal(groqInput.events[0].rawText, undefined);
+});
+
+test('enrichCandidates returns deterministic candidates when its total enrichment budget expires', async () => {
+  const candidates = [{ id: 'c1' }];
+  const events = [{ id: 'e1' }];
+  const client = {
+    responses: {
+      create: async (_request, { signal }) => new Promise((_, reject) => {
+        const abort = () => {
+          const error = new Error('provider request aborted');
+          error.name = 'APIUserAbortError';
+          reject(error);
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+      })
+    }
+  };
+
+  const result = await enrichCandidates({ candidates, events, client, totalTimeoutMs: 5 });
+  assert.equal(result.reasoningStatus, 'unavailable');
+  assert.equal(result.reasoningError, 'aiTimedOut');
+  assert.deepEqual(result.candidates, candidates);
+});

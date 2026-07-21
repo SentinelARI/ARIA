@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage, formatLedgerDate, greetingFor, lagosDayKey, lagosHour, lagosWeekday, localeMeta, localeOptions, localizedAction, localizedLedgerEntry, normalizeLocale, speechLocale, translate, typeLabel } from './i18n.mjs';
-import { apiEndpoint, fetchWithTimeout, normalizedRequestError, readJsonResponse, resolveApiOrigin } from './api.mjs';
+import { analysisResultFromPayload, apiEndpoint, fetchWithTimeout, normalizedRequestError, readJsonResponse, resolveApiOrigin, shouldRetryReasoningError } from './api.mjs';
 
 const apiUrl = resolveApiOrigin({ NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL, NODE_ENV: process.env.NODE_ENV });
 
@@ -179,6 +179,24 @@ function AgentFlow({ active, locale }) {
   return <section className="control-room textile-motif" aria-labelledby="control-title"><div><p className="eyebrow">{translate(locale, 'agent.eyebrow')}</p><h2 id="control-title">{translate(locale, 'agent.title')}</h2><p>{translate(locale, 'agent.description')}</p></div><ol className="agent-flow">{agents.map(([id, icon], index) => <li key={id} className={active === id ? 'active' : ''}><div className="agent-flow-top"><span>{String(index + 1).padStart(2, '0')}</span><Icon name={icon} size={18} /></div><div><strong>{translate(locale, `agent.${id.toLowerCase()}.label`)}</strong><small>{translate(locale, `agent.${id.toLowerCase()}.blurb`)}</small></div></li>)}</ol></section>;
 }
 
+function formatAnalysisResult(result) {
+  return JSON.stringify(result, null, 2) ?? 'null';
+}
+
+function AnalysisResult({ analysis, locale }) {
+  if (!analysis || analysis.error) return null;
+  return <div className="analysis-result" aria-live="polite">
+    <div className="result-heading">
+      <span><Icon name="terminal" size={17} /> {translate(locale, 'analysis.resultHeading')}</span>
+      <span>{translate(locale, 'analysis.boundary')}</span>
+    </div>
+    <div className="result-output">
+      <strong>{translate(locale, 'analysis.result')}</strong>
+      <pre className="analysis-output">{formatAnalysisResult(analysis.result)}</pre>
+    </div>
+  </div>;
+}
+
 export default function Home() {
   const [actions, setActions] = useState(fallbackActions);
   const [merchant, setMerchant] = useState(fallbackMerchants[0]);
@@ -190,6 +208,7 @@ export default function Home() {
   const [briefLoading, setBriefLoading] = useState(true);
   const [briefError, setBriefError] = useState(null);
   const [reasoning, setReasoning] = useState({ status: 'unavailable', errorCode: null });
+  const [briefReload, setBriefReload] = useState(0);
   const [expandedId, setExpandedId] = useState(null);
   const [defenses, setDefenses] = useState({});
   const [defenseLoading, setDefenseLoading] = useState(null);
@@ -202,6 +221,8 @@ export default function Home() {
   const [locale, setLocale] = useState('en');
   const [activeAgent, setActiveAgent] = useState('Priority');
   const defenseController = useRef(null);
+  const analysisController = useRef(null);
+  const briefRetryAttempts = useRef(new Map());
   const now = useLiveTime(referenceAt);
   const animatedDiscardCount = useCountUp(summary.opportunitiesDiscarded);
   const currentLagosDay = lagosDayKey(now);
@@ -228,6 +249,7 @@ export default function Home() {
   useEffect(() => {
     if (!currentLagosDay) return undefined;
     const controller = new AbortController();
+    let retryTimer = null;
     setBriefLoading(true);
     setBriefError(null);
     setReasoning({ status: 'loading', errorCode: null });
@@ -243,8 +265,15 @@ export default function Home() {
         setSummary(brief.prioritySummary);
         setLedger(brief.ledger);
         setReferenceAt({ value: brief.simulatedAt ?? new Date().toISOString(), receivedAt: Date.now() });
-        setReasoning({ status: brief.reasoningStatus ?? 'unavailable', errorCode: brief.reasoningError ?? null });
+        const nextReasoning = { status: brief.reasoningStatus ?? 'unavailable', errorCode: brief.reasoningError ?? null };
+        setReasoning(nextReasoning);
         setActiveAgent('Priority');
+        const retryKey = `${merchantId}:${currentLagosDay}`;
+        const retries = briefRetryAttempts.current.get(retryKey) ?? 0;
+        if (nextReasoning.status !== 'ok' && shouldRetryReasoningError(nextReasoning.errorCode) && retries < 1) {
+          briefRetryAttempts.current.set(retryKey, retries + 1);
+          retryTimer = window.setTimeout(() => setBriefReload((value) => value + 1), 2_000);
+        }
       })
       .catch((error) => {
         if (error.name !== 'AbortError') {
@@ -258,8 +287,11 @@ export default function Home() {
       .finally(() => {
         if (!controller.signal.aborted) setBriefLoading(false);
       });
-    return () => controller.abort();
-  }, [merchantId, currentLagosDay]);
+    return () => {
+      controller.abort();
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [merchantId, currentLagosDay, briefReload]);
 
   useEffect(() => {
     if (!draftNotice) return undefined;
@@ -267,7 +299,10 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [draftNotice]);
 
-  useEffect(() => () => defenseController.current?.abort(), []);
+  useEffect(() => () => {
+    defenseController.current?.abort();
+    analysisController.current?.abort();
+  }, []);
 
   function clearDefense(insightId) {
     defenseController.current?.abort();
@@ -337,22 +372,36 @@ export default function Home() {
 
   async function runAnalysis(event) {
     event.preventDefault();
-    if (!question.trim()) {
+    const submittedQuestion = question.trim();
+    if (!submittedQuestion) {
       setAnalysis({ error: { code: 'analysisQuestionRequired' } });
       return;
     }
+    analysisController.current?.abort();
+    const controller = new AbortController();
+    analysisController.current = controller;
     setAnalysisLoading(true);
     setAnalysis(null);
     setActiveAgent('Analysis');
     try {
-      const response = await fetchWithTimeout(apiEndpoint(apiUrl, '/api/analysis'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merchantId, question, locale }) });
+      const response = await fetchWithTimeout(apiEndpoint(apiUrl, '/api/analysis'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ merchantId, question: submittedQuestion, locale }),
+        signal: controller.signal
+      });
       const payload = await readJsonResponse(response);
-      setAnalysis({ question, result: payload.result, generatedCode: payload.generatedCode });
+      const result = analysisResultFromPayload(payload);
+      if (analysisController.current === controller) setAnalysis({ result });
     } catch (error) {
+      if (controller.signal.aborted || error.name === 'AbortError') return;
       const normalized = normalizedRequestError(error);
-      setAnalysis({ question, error: { code: normalized.code, message: normalized.message } });
+      if (analysisController.current === controller) setAnalysis({ error: { code: normalized.code, message: normalized.message } });
     } finally {
-      setAnalysisLoading(false);
+      if (analysisController.current === controller) {
+        analysisController.current = null;
+        setAnalysisLoading(false);
+      }
     }
   }
 
@@ -360,11 +409,14 @@ export default function Home() {
     if (nextMerchantId === merchantId) return;
     defenseController.current?.abort();
     defenseController.current = null;
+    analysisController.current?.abort();
+    analysisController.current = null;
     setMerchantId(nextMerchantId);
     setExpandedId(null);
     setDefenses({});
     setDefenseLoading(null);
     setAnalysis(null);
+    setAnalysisLoading(false);
     setSentActionId(null);
     setDraftNotice(null);
   }
@@ -430,7 +482,7 @@ export default function Home() {
       })}</div>
     </section>
 
-    <section className="analysis" aria-labelledby="analysis-title"><div><p className="eyebrow">{translate(locale, 'analysis.eyebrow')}</p><h2 id="analysis-title">{copy.question}</h2><p>{translate(locale, 'analysis.description')}</p></div><form onSubmit={runAnalysis} className="analysis-form"><label htmlFor="analysis-question">{translate(locale, 'analysis.label')}</label><div className="question-row"><input id="analysis-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={translate(locale, 'analysis.placeholder')} maxLength="300" aria-describedby={analysis?.error ? 'analysis-helper analysis-error' : 'analysis-helper'} disabled={analysisLoading} /><button className="primary" type="submit" disabled={analysisLoading}>{analysisLoading ? translate(locale, 'analysis.running') : translate(locale, 'analysis.run')} <Icon name="arrow" size={16} /></button></div><p className="helper" id="analysis-helper">{copy.helper}</p>{analysis?.error && <p className="form-error" id="analysis-error" role="alert">{errorMessage(locale, analysis.error)}</p>}</form>{analysis && <div className="analysis-result" aria-live="polite">{analysis.error ? <><strong>{translate(locale, 'analysis.invalid')}</strong><p>{errorMessage(locale, analysis.error)}</p></> : <><div className="result-heading"><span><Icon name="terminal" size={17} /> {translate(locale, 'analysis.resultHeading')}</span><span>{translate(locale, 'analysis.boundary')}</span></div><pre>{analysis.generatedCode}</pre><div className="result-output"><strong>{translate(locale, 'analysis.result')}</strong><code>{JSON.stringify(analysis.result, null, 2)}</code></div></>}</div>}</section>
+    <section className="analysis" aria-labelledby="analysis-title"><div><p className="eyebrow">{translate(locale, 'analysis.eyebrow')}</p><h2 id="analysis-title">{copy.question}</h2><p>{translate(locale, 'analysis.description')}</p></div><form onSubmit={runAnalysis} className="analysis-form"><label htmlFor="analysis-question">{translate(locale, 'analysis.label')}</label><div className="question-row"><input id="analysis-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={translate(locale, 'analysis.placeholder')} maxLength="300" aria-describedby={analysis?.error ? 'analysis-helper analysis-error' : 'analysis-helper'} disabled={analysisLoading} /><button className="primary" type="submit" disabled={analysisLoading}>{analysisLoading ? translate(locale, 'analysis.running') : translate(locale, 'analysis.run')} <Icon name="arrow" size={16} /></button></div><p className="helper" id="analysis-helper">{copy.helper}</p>{analysis?.error && <p className="form-error" id="analysis-error" role="alert">{errorMessage(locale, analysis.error)}</p>}</form><AnalysisResult analysis={analysis} locale={locale} /></section>
 
     <AgentFlow active={activeAgent} locale={locale} />
 

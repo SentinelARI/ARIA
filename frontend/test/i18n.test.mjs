@@ -29,6 +29,8 @@ test('English and Pidgin use structured copy instead of an English sentence fall
   assert.equal(translate('pg', 'action.useDraft'), 'Use draft');
   assert.match(errorMessage('en', { code: 'aiQuotaExceeded' }), /billing or credits/);
   assert.match(errorMessage('pg', { code: 'aiQuotaExceeded' }), /API quota/);
+  assert.match(errorMessage('en', { code: 'aiProvidersUnavailable' }), /Both configured AI services/);
+  assert.match(errorMessage('pg', { code: 'aiProvidersUnavailable' }), /Both configured AI services/);
 });
 
 test('Lagos date helpers derive the current local calendar day', () => {

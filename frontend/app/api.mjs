@@ -1,5 +1,6 @@
 const LOCAL_API_ORIGIN = 'http://localhost:4000';
 const DEFAULT_TIMEOUT_MS = 55_000;
+const RETRYABLE_REASONING_ERRORS = new Set(['aiServiceUnavailable', 'aiTimedOut', 'aiRateLimited', 'aiProvidersUnavailable']);
 
 function requestError(message, code, requestId = null) {
   const error = new Error(message);
@@ -26,6 +27,17 @@ export function apiEndpoint(origin, path) {
 export function normalizedRequestError(error) {
   if (error?.code) return error;
   return requestError('ARIA could not complete that request.', 'requestFailed', error?.requestId ?? null);
+}
+
+export function shouldRetryReasoningError(errorCode) {
+  return RETRYABLE_REASONING_ERRORS.has(errorCode);
+}
+
+export function analysisResultFromPayload(payload) {
+  if (!payload || typeof payload !== 'object' || !Object.hasOwn(payload, 'result')) {
+    throw requestError('ARIA returned an invalid analysis response.', 'invalidApiResponse');
+  }
+  return payload.result;
 }
 
 export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
