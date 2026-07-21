@@ -90,7 +90,7 @@ function shouldRetryFormatting(error) {
     && failure.providerFailures.every((providerFailure) => providerFailure.failureCode === 'aiInvalidResponse');
 }
 
-export async function enrichCandidates({ candidates, events, client, groqClient, environment = process.env, model, groqModel, signal, totalTimeoutMs = DEFAULT_ENRICHMENT_BUDGET_MS }) {
+export async function enrichCandidates({ candidates, events, client, groqClient, environment = process.env, model, groqModel, signal, totalTimeoutMs = DEFAULT_ENRICHMENT_BUDGET_MS, onProviderSelected }) {
   if (!Array.isArray(candidates)) throw new Error('candidates must be an array');
   const openAIModel = model ?? configuredOpenAIModel(environment);
   const selectedGroqModel = groqModel ?? configuredGroqModel(environment);
@@ -114,7 +114,7 @@ export async function enrichCandidates({ candidates, events, client, groqClient,
       runOpenAI: async () => parsedResponse(await createOpenAIClient(client, environment, openAIModel).responses.create({ model: openAIModel, reasoning: { effort: 'high' }, instructions, input: JSON.stringify(input) }, aiRequestOptions(deadline.signal)), candidateIds, eventIds),
       runGroq: async () => parsedResponse(await createGroqClient(groqClient, environment, selectedGroqModel).responses.create({ model: selectedGroqModel, reasoning: { effort: 'high' }, instructions, input: JSON.stringify(input) }, aiRequestOptions(deadline.signal)), candidateIds, eventIds)
     });
-    return runWithAiFallback(definitions);
+    return runWithAiFallback({ ...definitions, onProviderSelected });
   }
 
   try {

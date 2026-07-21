@@ -43,7 +43,7 @@ function defenseRequest({ insight, evidence, locale = 'en', model, stream = fals
   };
 }
 
-async function textWithFallback({ client, groqClient, environment, model, groqModel, requestForModel, transform = outputText, signal }) {
+async function textWithFallback({ client, groqClient, environment, model, groqModel, requestForModel, transform = outputText, signal, onProviderSelected }) {
   const definitions = aiProviderDefinitions({
     client,
     groqClient,
@@ -53,7 +53,7 @@ async function textWithFallback({ client, groqClient, environment, model, groqMo
     runOpenAI: async () => transform(await createOpenAIClient(client, environment, model).responses.create(requestForModel(model), aiRequestOptions(signal))),
     runGroq: async () => transform(await createGroqClient(groqClient, environment, groqModel).responses.create(requestForModel(groqModel), aiRequestOptions(signal)))
   });
-  const result = await runWithAiFallback(definitions);
+  const result = await runWithAiFallback({ ...definitions, onProviderSelected });
   return result.value;
 }
 
@@ -85,7 +85,7 @@ function analysisRequest(question, events, providerModel) {
   };
 }
 
-async function analysisWithFallback({ question, events, client, groqClient, environment, model, groqModel, signal, executeProgram, providerSelectionTimeoutMs }) {
+async function analysisWithFallback({ question, events, client, groqClient, environment, model, groqModel, signal, executeProgram, providerSelectionTimeoutMs, onProviderSelected }) {
   const openAIModel = model ?? configuredOpenAIModel(environment);
   const selectedGroqModel = groqModel ?? configuredGroqModel(environment);
   const analysisEvents = prepareAnalysisEvents(events);
@@ -98,6 +98,7 @@ async function analysisWithFallback({ question, events, client, groqClient, envi
       model: openAIModel,
       groqModel: selectedGroqModel,
       signal: deadline?.signal ?? signal,
+      onProviderSelected,
       transform: async (response) => {
         const code = outputText(response);
         try {
@@ -197,7 +198,7 @@ async function firstOutputDelta(createStream, signal, timeoutMs = DEFAULT_PROVID
   }
 }
 
-export async function generateAnalysisProgram({ question, events, client, groqClient, environment = process.env, model, groqModel, signal }) {
+export async function generateAnalysisProgram({ question, events, client, groqClient, environment = process.env, model, groqModel, signal, onProviderSelected }) {
   return analysisWithFallback({
     question,
     events,
@@ -206,11 +207,12 @@ export async function generateAnalysisProgram({ question, events, client, groqCl
     environment,
     model,
     groqModel,
-    signal
+    signal,
+    onProviderSelected
   });
 }
 
-export async function runAnalysisProgram({ question, events, sandbox, client, groqClient, environment = process.env, model, groqModel, signal, providerSelectionTimeoutMs = DEFAULT_ANALYSIS_PROVIDER_SELECTION_BUDGET_MS }) {
+export async function runAnalysisProgram({ question, events, sandbox, client, groqClient, environment = process.env, model, groqModel, signal, providerSelectionTimeoutMs = DEFAULT_ANALYSIS_PROVIDER_SELECTION_BUDGET_MS, onProviderSelected }) {
   if (typeof sandbox !== 'function') throw new Error('Analysis sandbox must be a function.');
   return analysisWithFallback({
     question,
@@ -222,11 +224,12 @@ export async function runAnalysisProgram({ question, events, sandbox, client, gr
     groqModel,
     signal,
     providerSelectionTimeoutMs,
+    onProviderSelected,
     executeProgram: (code, analysisEvents) => sandbox(code, analysisEvents)
   });
 }
 
-export async function generateDefenseNarrative({ insight, evidence, locale = 'en', client, groqClient, environment = process.env, model, groqModel, signal }) {
+export async function generateDefenseNarrative({ insight, evidence, locale = 'en', client, groqClient, environment = process.env, model, groqModel, signal, onProviderSelected }) {
   const openAIModel = model ?? configuredOpenAIModel(environment);
   const selectedGroqModel = groqModel ?? configuredGroqModel(environment);
   return textWithFallback({
@@ -236,11 +239,12 @@ export async function generateDefenseNarrative({ insight, evidence, locale = 'en
     model: openAIModel,
     groqModel: selectedGroqModel,
     signal,
+    onProviderSelected,
     requestForModel: (providerModel) => defenseRequest({ insight, evidence, locale, model: providerModel })
   });
 }
 
-export async function* streamDefenseNarrative({ insight, evidence, locale = 'en', client, groqClient, environment = process.env, model, groqModel, signal, firstDeltaTimeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS }) {
+export async function* streamDefenseNarrative({ insight, evidence, locale = 'en', client, groqClient, environment = process.env, model, groqModel, signal, firstDeltaTimeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS, onProviderSelected }) {
   const openAIModel = model ?? configuredOpenAIModel(environment);
   const selectedGroqModel = groqModel ?? configuredGroqModel(environment);
   const definitions = aiProviderDefinitions({
@@ -261,7 +265,7 @@ export async function* streamDefenseNarrative({ insight, evidence, locale = 'en'
 
   let selected;
   try {
-    selected = await runWithAiFallback(definitions);
+    selected = await runWithAiFallback({ ...definitions, onProviderSelected });
   } catch (error) {
     if (isRequestAbort(error)) throw error;
     throw asAiFailure(error);

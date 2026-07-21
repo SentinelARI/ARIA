@@ -1,6 +1,8 @@
 import OpenAI from 'openai';
 
-export const DEFAULT_OPENAI_MODEL = 'gpt-5.6-terra';
+// Luna is the lower-cost GPT-5.6 API tier. Explicit Railway configuration still
+// takes precedence, so deployments can pin a different supported model if needed.
+export const DEFAULT_OPENAI_MODEL = 'gpt-5.6-luna';
 export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
 export const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 
@@ -198,6 +200,21 @@ function safeFailureDetails(error) {
   };
 }
 
+function reportProviderSelection(onProviderSelected, provider, definition, primaryFailure = null) {
+  if (typeof onProviderSelected !== 'function') return;
+  // Observability must never change the request outcome. The callback receives
+  // operational metadata only: no prompts, event data, generated code, or output.
+  try {
+    onProviderSelected({
+      provider,
+      model: definition?.model ?? null,
+      primaryFailure: primaryFailure ? safeFailureDetails(primaryFailure) : null
+    });
+  } catch {
+    // A logging adapter is optional and must remain best-effort.
+  }
+}
+
 export function aiFailureDiagnostics(error) {
   const failure = asAiFailure(error);
   return { ...safeFailureDetails(failure), providerFailures: failure.providerFailures };
@@ -259,11 +276,13 @@ export function createAiFailover({ now = () => Date.now() } = {}) {
   }
 
   return {
-    async run({ openai, groq = null, bypassCooldown = false }) {
+    async run({ openai, groq = null, bypassCooldown = false, onProviderSelected }) {
       let primaryFailure = bypassCooldown ? null : cachedFailure('openai');
       if (!primaryFailure) {
         try {
-          return { provider: 'openai', value: await attempt('openai', openai, !bypassCooldown) };
+          const value = await attempt('openai', openai, !bypassCooldown);
+          reportProviderSelection(onProviderSelected, 'openai', openai);
+          return { provider: 'openai', value };
         } catch (error) {
           if (isRequestAbort(error)) throw error;
           primaryFailure = error;
@@ -275,7 +294,9 @@ export function createAiFailover({ now = () => Date.now() } = {}) {
       let fallbackFailure = bypassCooldown ? null : cachedFailure('groq');
       if (!fallbackFailure) {
         try {
-          return { provider: 'groq', value: await attempt('groq', groq, !bypassCooldown) };
+          const value = await attempt('groq', groq, !bypassCooldown);
+          reportProviderSelection(onProviderSelected, 'groq', groq, primaryFailure);
+          return { provider: 'groq', value };
         } catch (error) {
           if (isRequestAbort(error)) throw error;
           fallbackFailure = error;

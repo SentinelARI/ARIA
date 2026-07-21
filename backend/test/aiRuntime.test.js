@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 import { asAiFailure, configuredGroqKey, configuredGroqModel, configuredOpenAIKey, configuredOpenAIModel, createAiFailover, DEFAULT_GROQ_MODEL, DEFAULT_OPENAI_MODEL, isRequestAbort } from '../src/aiRuntime.js';
 
 test('AI configuration uses the verified explicit model and trims environment values', () => {
-  assert.equal(DEFAULT_OPENAI_MODEL, 'gpt-5.6-terra');
+  assert.equal(DEFAULT_OPENAI_MODEL, 'gpt-5.6-luna');
   assert.equal(configuredOpenAIModel({ OPENAI_MODEL: '  custom-model  ' }), 'custom-model');
   assert.equal(configuredOpenAIModel({ OPENAI_MODEL: '   ' }), DEFAULT_OPENAI_MODEL);
   assert.equal(configuredOpenAIKey({ OPENAI_API_KEY: '  test-key  ' }), 'test-key');
@@ -14,6 +14,40 @@ test('AI configuration uses the verified explicit model and trims environment va
   assert.equal(configuredGroqModel({ GROQ_MODEL: '   ' }), DEFAULT_GROQ_MODEL);
   assert.equal(configuredGroqKey({ GROQ_API_KEY: '  groq-test-key  ' }), 'groq-test-key');
   assert.equal(configuredGroqKey({ GROQ_API_KEY: '   ' }), null);
+});
+
+test('provider failover reports a safe fallback selection without exposing provider output', async () => {
+  const selections = [];
+  const failover = createAiFailover();
+  const result = await failover.run({
+    openai: {
+      model: 'openai-test',
+      run: async () => {
+        const error = new Error('private OpenAI detail');
+        error.status = 429;
+        error.error = { code: 'insufficient_quota', type: 'insufficient_quota' };
+        throw error;
+      }
+    },
+    groq: { model: 'groq-test', run: async () => 'safe result' },
+    onProviderSelected(selection) { selections.push(selection); }
+  });
+
+  assert.deepEqual(result, { provider: 'groq', value: 'safe result' });
+  assert.deepEqual(selections, [{
+    provider: 'groq',
+    model: 'groq-test',
+    primaryFailure: {
+      provider: 'openai',
+      model: 'openai-test',
+      failureCode: 'aiQuotaExceeded',
+      providerStatus: 429,
+      providerCode: 'insufficient_quota',
+      providerType: 'insufficient_quota',
+      providerRequestId: null
+    }
+  }]);
+  assert.doesNotMatch(JSON.stringify(selections), /private OpenAI detail|safe result/);
 });
 
 test('AI errors map to stable safe categories', () => {

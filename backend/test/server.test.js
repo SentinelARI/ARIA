@@ -128,6 +128,43 @@ test('analysis route delegates production-style execution to an analysis runner'
   assert.ok(runnerInput.events.every((event) => !('rawText' in event) && !('copy' in event)));
 });
 
+test('analysis records a safe provider fallback event without returning provider diagnostics', async () => {
+  const infos = [];
+  const app = createTestApp({
+    analysisRunner: async ({ onProviderSelected }) => {
+      onProviderSelected({
+        provider: 'groq',
+        model: 'openai/gpt-oss-20b',
+        primaryFailure: {
+          provider: 'openai',
+          model: 'gpt-5.6-luna',
+          failureCode: 'aiQuotaExceeded',
+          providerStatus: 429,
+          providerCode: 'insufficient_quota',
+          providerType: 'insufficient_quota',
+          providerRequestId: 'provider-request-id'
+        }
+      });
+      return { ok: true };
+    },
+    logger: { error() {}, info(message) { infos.push(message); } }
+  });
+  await withServer(app, async (baseUrl) => {
+    const response = await post(baseUrl, '/api/analysis', { question: 'Which customers have gone quiet?' });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload, { result: { ok: true } });
+    assert.doesNotMatch(JSON.stringify(payload), /groq|provider-request-id|gpt-5\.6-luna/);
+  });
+  const log = JSON.parse(infos[0]);
+  assert.equal(log.event, 'aria.ai_provider_fallback');
+  assert.equal(log.operation, 'analysis');
+  assert.equal(log.provider, 'groq');
+  assert.equal(log.primaryProvider, 'openai');
+  assert.equal(log.primaryFailureCode, 'aiQuotaExceeded');
+  assert.equal(log.primaryProviderRequestId, 'provider-request-id');
+});
+
 test('brief surfaces actions after real successful reasoning enrichment', async () => {
   const client = {
     responses: {

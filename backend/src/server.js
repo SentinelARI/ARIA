@@ -147,6 +147,30 @@ function logAiFailure(response, operation, error) {
   }));
 }
 
+function logAiProviderSelection(response, operation, selection) {
+  const primaryFailure = selection?.primaryFailure;
+  response.locals.logger?.info?.(JSON.stringify({
+    event: primaryFailure ? 'aria.ai_provider_fallback' : 'aria.ai_provider_selected',
+    operation,
+    requestId: response.locals.requestId,
+    provider: selection?.provider ?? null,
+    model: selection?.model ?? null,
+    ...(primaryFailure ? {
+      primaryProvider: primaryFailure.provider,
+      primaryModel: primaryFailure.model,
+      primaryFailureCode: primaryFailure.failureCode,
+      primaryProviderStatus: primaryFailure.providerStatus,
+      primaryProviderCode: primaryFailure.providerCode,
+      primaryProviderType: primaryFailure.providerType,
+      primaryProviderRequestId: primaryFailure.providerRequestId
+    } : {})
+  }));
+}
+
+function aiProviderSelectionLogger(response, operation) {
+  return (selection) => logAiProviderSelection(response, operation, selection);
+}
+
 function sendError(response, status, error, locale, fallbackCode, operation = 'request') {
   logAiFailure(response, operation, error);
   return response.status(status).json(errorPayload(error, locale, fallbackCode, response.locals.requestId));
@@ -250,7 +274,7 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       let reasoningError = null;
       let reasoningDiagnostics = null;
       try {
-        const enrichment = await reasoningEnrichment({ candidates: baseCandidates, events, signal: abortScope.signal });
+        const enrichment = await reasoningEnrichment({ candidates: baseCandidates, events, signal: abortScope.signal, onProviderSelected: aiProviderSelectionLogger(response, 'brief') });
         if (abortScope.signal.aborted) return endDisconnectedResponse(response);
         if (enrichment && enrichment.reasoningStatus === 'ok' && Array.isArray(enrichment.candidates)) {
           enrichedCandidates = enrichment.candidates;
@@ -301,7 +325,7 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       const { events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
       const defense = rederiveDefenseEvidence(events, request.body.insightId, referenceDate);
       abortScope = connectionAbortScope(request, response);
-      const narrative = await defenseNarrative({ ...defense, locale, signal: abortScope.signal });
+      const narrative = await defenseNarrative({ ...defense, locale, signal: abortScope.signal, onProviderSelected: aiProviderSelectionLogger(response, 'defense') });
       if (abortScope.signal.aborted) return endDisconnectedResponse(response);
       return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
     } catch (error) {
@@ -322,7 +346,7 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       const { events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
       const defense = rederiveDefenseEvidence(events, request.body.insightId, referenceDate);
       abortScope = connectionAbortScope(request, response);
-      const narrativeStream = defenseStream({ ...defense, locale, signal: abortScope.signal });
+      const narrativeStream = defenseStream({ ...defense, locale, signal: abortScope.signal, onProviderSelected: aiProviderSelectionLogger(response, 'defense_stream') });
       const firstChunk = await narrativeStream.next();
       if (abortScope.signal.aborted) return endDisconnectedResponse(response);
       response.status(200).set({
@@ -362,9 +386,9 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       abortScope = connectionAbortScope(request, response);
       let result;
       if (selectedAnalysisRunner) {
-        result = await selectedAnalysisRunner({ question, events: analysisEvents, sandbox, signal: abortScope.signal });
+        result = await selectedAnalysisRunner({ question, events: analysisEvents, sandbox, signal: abortScope.signal, onProviderSelected: aiProviderSelectionLogger(response, 'analysis') });
       } else {
-        const code = await selectedAnalysisProgram({ question, events: analysisEvents, signal: abortScope.signal });
+        const code = await selectedAnalysisProgram({ question, events: analysisEvents, signal: abortScope.signal, onProviderSelected: aiProviderSelectionLogger(response, 'analysis') });
         if (abortScope.signal.aborted) return endDisconnectedResponse(response);
         result = await sandbox(code, analysisEvents);
       }
