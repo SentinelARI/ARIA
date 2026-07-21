@@ -1,6 +1,9 @@
 {
   "name": "aria-workspace",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "workspaces": ["frontend", "backend"],
   "scripts": {
     "test": "npm --workspace backend test && npm --workspace frontend test",

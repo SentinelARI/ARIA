@@ -27,6 +27,8 @@ test('English and Pidgin use structured copy instead of an English sentence fall
   assert.notEqual(pidgin.title, english.title);
   assert.equal(normalizeLocale('unknown'), 'en');
   assert.equal(translate('pg', 'action.useDraft'), 'Use draft');
+  assert.match(errorMessage('en', { code: 'aiQuotaExceeded' }), /billing or credits/);
+  assert.match(errorMessage('pg', { code: 'aiQuotaExceeded' }), /API quota/);
 });
 
 test('Lagos date helpers derive the current local calendar day', () => {

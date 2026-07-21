@@ -88,7 +88,7 @@ test('enrichCandidates - retry on invalid JSON then succeed', async () => {
   assert.equal(calls, 2);
 });
 
-test('enrichCandidates - reject unknown related ids after retry', async () => {
+test('enrichCandidates - invalid model output falls back without losing deterministic candidates', async () => {
   const candidates = [{ id: 'c1' }];
   const events = [{ id: 'e1' }];
   const mockClient = {
@@ -96,9 +96,10 @@ test('enrichCandidates - reject unknown related ids after retry', async () => {
       create: async () => ({ output_text: JSON.stringify([{ id: 'c1', reasoning: 'r', crossSignals: ['unknown'] }]) })
     }
   };
-  await assert.rejects(async () => enrichCandidates({ candidates, events, client: mockClient }), {
-    message: /Related id not found/
-  });
+  const result = await enrichCandidates({ candidates, events, client: mockClient });
+  assert.equal(result.reasoningStatus, 'unavailable');
+  assert.equal(result.reasoningError, 'aiInvalidResponse');
+  assert.deepEqual(result.candidates, candidates);
 });
 
 test('enrichCandidates - graceful degradation on API failure', async () => {
@@ -111,6 +112,25 @@ test('enrichCandidates - graceful degradation on API failure', async () => {
   };
   const result = await enrichCandidates({ candidates, events, client: mockClient });
   assert.equal(result.reasoningStatus, 'unavailable');
+  assert.deepEqual(result.candidates, candidates);
+});
+
+test('enrichCandidates exposes a safe quota category without leaking provider text', async () => {
+  const candidates = [{ id: 'c1' }];
+  const events = [{ id: 'e1' }];
+  const mockClient = {
+    responses: {
+      create: async () => {
+        const error = new Error('sensitive provider detail');
+        error.status = 429;
+        error.error = { code: 'insufficient_quota', type: 'insufficient_quota' };
+        throw error;
+      }
+    }
+  };
+  const result = await enrichCandidates({ candidates, events, client: mockClient });
+  assert.equal(result.reasoningStatus, 'unavailable');
+  assert.equal(result.reasoningError, 'aiQuotaExceeded');
   assert.deepEqual(result.candidates, candidates);
 });
 

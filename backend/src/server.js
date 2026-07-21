@@ -1,14 +1,15 @@
 import cors from 'cors';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { pathToFileURL } from 'node:url';
 import { createSyntheticMerchantData, demoMerchants } from './data.js';
-import { createMorningBrief, createTrustLedger, rederiveDefenseEvidence, summarizePrioritization, deriveCandidates, prioritize } from './agents.js';
+import { createTrustLedger, rederiveDefenseEvidence, summarizePrioritization, deriveCandidates, prioritize } from './agents.js';
 import { generateAnalysisProgram, generateDefenseNarrative, streamDefenseNarrative } from './ai.js';
 import reasoningModule from './reasoningAgent.js';
 const { enrichCandidates } = reasoningModule;
 import { executeInSandbox } from './sandbox.js';
+import { AiFailure, configuredOpenAIModel } from './aiRuntime.js';
 
-const allowedOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim()).filter(Boolean);
 const businessTerms = /\b(sale|sales|customer|customers|client|clients|order|orders|inventory|stock|supplier|suppliers|price|prices|pricing|purchase|purchases|revenue|payment|payments|product|products|buyer|buyers|buy|buying|market|money|quiet)\b/i;
 const unsafeQuestionPattern = /(?:ignore|disregard).{0,80}(?:instruction|rule)|(?:api|secret|access)\s*key|system\s+prompt/i;
 const pidginErrors = Object.freeze({
@@ -20,8 +21,47 @@ const pidginErrors = Object.freeze({
   rateLimitAnalysis: 'Abeg wait one minute before you run more analysis.',
   rateLimitDefense: 'Abeg wait one minute before you ask ARIA make e check another action.',
   invalidJson: 'Send correct JSON.',
-  serviceUnavailable: 'ARIA no dey available now. Abeg try again soon.'
+  serviceUnavailable: 'ARIA no dey available now. Abeg try again soon.',
+  analysisFailed: 'ARIA no fit run this analysis safely. Try ask am another business question.',
+  aiNotConfigured: 'Person wey manage ARIA never set the AI service well.',
+  aiAuthenticationFailed: 'The AI service reject ARIA configuration. Person wey manage am need check the API key.',
+  aiAccessDenied: 'This API key no get permission to use the AI service wey ARIA need.',
+  aiModelUnavailable: 'The AI model wey ARIA configure no dey available for this project. Person wey manage am need choose another model.',
+  aiQuotaExceeded: 'This AI project don finish API quota. Person wey manage am need add billing or credit before e fit work again.',
+  aiRateLimited: 'The AI service get too many request now. Abeg try again shortly.',
+  aiTimedOut: 'The AI service take too long to answer. Abeg try again.',
+  aiInvalidResponse: 'The AI service return answer wey ARIA no fit use safely. Abeg try again.',
+  aiServiceUnavailable: 'ARIA no dey available now. Abeg try again soon.'
 });
+
+const englishErrors = Object.freeze({
+  invalidJson: 'Send valid JSON.',
+  serviceUnavailable: 'ARIA is temporarily unavailable. Please try again shortly.',
+  analysisFailed: 'ARIA could not safely complete that analysis. Try a more specific business question.',
+  aiNotConfigured: 'The AI service has not been configured on the server.',
+  aiAuthenticationFailed: 'The AI service rejected the server configuration. The operator should verify the API key.',
+  aiAccessDenied: 'This API key does not have permission to use the configured AI service.',
+  aiModelUnavailable: 'The configured AI model is unavailable for this project. The operator should choose an accessible model.',
+  aiQuotaExceeded: 'This AI project has no available API quota. The operator must add billing or credits before live AI can run.',
+  aiRateLimited: 'The AI service is receiving too many requests. Please try again shortly.',
+  aiTimedOut: 'The AI service took too long to respond. Please try again.',
+  aiInvalidResponse: 'The AI service returned a response ARIA could not safely use. Please try again.',
+  aiServiceUnavailable: 'ARIA is temporarily unavailable. Please try again shortly.'
+});
+
+function normalizeOrigin(value) {
+  const origin = value.trim();
+  const parsed = new URL(origin);
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || (parsed.pathname !== '/' && parsed.pathname !== '') || parsed.search || parsed.hash) {
+    throw new Error('FRONTEND_ORIGIN entries must be complete HTTP(S) origins without a path.');
+  }
+  return parsed.origin;
+}
+
+export function configuredAllowedOrigins(value = process.env.FRONTEND_ORIGIN) {
+  if (!value?.trim()) return [];
+  return [...new Set(value.split(',').map((origin) => origin.trim()).filter(Boolean).map(normalizeOrigin))];
+}
 
 function resolveMerchant(merchantData, merchantId, referenceDate) {
   const datasets = typeof merchantData === 'function' ? merchantData(referenceDate) : merchantData;
@@ -34,16 +74,6 @@ function referenceDateFrom(clock) {
   const referenceDate = new Date(clock());
   if (Number.isNaN(referenceDate.getTime())) throw new Error('ARIA could not determine the current time.');
   return referenceDate;
-}
-
-function lagosDayKey(referenceDate) {
-  return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Africa/Lagos' }).format(referenceDate);
-}
-
-function cachedCandidateFor(cache, merchantId, insightId, referenceDate) {
-  const cachedBrief = cache.get(merchantId);
-  if (!cachedBrief || cachedBrief.referenceDay !== lagosDayKey(referenceDate)) return null;
-  return cachedBrief.candidates.find((candidate) => candidate.id === insightId) ?? null;
 }
 
 function localeFor(value) {
@@ -70,7 +100,9 @@ function messageFor(error) {
   return error instanceof Error ? error.message : 'ARIA could not complete that request.';
 }
 
-function errorCode(message, fallback = 'serviceUnavailable') {
+function errorCode(error, fallback = 'serviceUnavailable') {
+  if (error instanceof AiFailure) return error.failureCode;
+  const message = messageFor(error);
   if (message.startsWith('Ask a business question between')) return 'invalidQuestion';
   if (message.startsWith('ARIA cannot access')) return 'unsafeQuestion';
   if (message.startsWith('ARIA only analyzes')) return 'offTopicQuestion';
@@ -79,21 +111,41 @@ function errorCode(message, fallback = 'serviceUnavailable') {
   return fallback;
 }
 
-function errorPayload(error, locale, fallbackCode) {
+function publicErrorMessage(code, locale, fallback) {
+  const messages = locale === 'pg' ? pidginErrors : englishErrors;
+  return messages[code] ?? fallback;
+}
+
+function errorPayload(error, locale, fallbackCode, requestId) {
   const message = messageFor(error);
-  const code = errorCode(message, fallbackCode);
-  return { error: locale === 'pg' ? pidginErrors[code] ?? pidginErrors.serviceUnavailable : message, errorCode: code };
+  const code = errorCode(error, fallbackCode);
+  return { error: publicErrorMessage(code, locale, message), errorCode: code, requestId };
 }
 
-function sendError(response, status, error, locale, fallbackCode) {
-  return response.status(status).json(errorPayload(error, locale, fallbackCode));
+function logAiFailure(response, operation, error) {
+  if (!(error instanceof AiFailure)) return;
+  response.locals.logger?.error?.(JSON.stringify({
+    event: 'aria.ai_failure',
+    operation,
+    requestId: response.locals.requestId,
+    failureCode: error.failureCode,
+    providerStatus: error.providerStatus,
+    providerCode: error.providerCode,
+    providerType: error.providerType,
+    providerRequestId: error.providerRequestId,
+    model: configuredOpenAIModel()
+  }));
 }
 
-export function createApp({ merchantData = createSyntheticMerchantData, clock = () => new Date(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, reasoningEnrichment = enrichCandidates, rateLimitMaximum = 10, defenseRateLimitMaximum = 20 } = {}) {
+function sendError(response, status, error, locale, fallbackCode, operation = 'request') {
+  logAiFailure(response, operation, error);
+  return response.status(status).json(errorPayload(error, locale, fallbackCode, response.locals.requestId));
+}
+
+export function createApp({ merchantData = createSyntheticMerchantData, clock = () => new Date(), analysisProgram = generateAnalysisProgram, defenseNarrative = generateDefenseNarrative, defenseStream = streamDefenseNarrative, sandbox = executeInSandbox, reasoningEnrichment = enrichCandidates, rateLimitMaximum = 10, defenseRateLimitMaximum = 20, corsOrigins = configuredAllowedOrigins(), isProduction = process.env.NODE_ENV === 'production', logger = console } = {}) {
   const app = express();
   const analysisRequests = new Map();
   const defenseRequests = new Map();
-  const briefEnrichmentCache = new Map();
 
   function rateLimit(requests, maximumRequests, errorMessage, errorCodeValue) {
     return function applyRateLimit(request, response, next) {
@@ -116,7 +168,13 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
 
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
-  app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : process.env.NODE_ENV === 'production' ? false : true, methods: ['GET', 'POST'], maxAge: 86_400 }));
+  app.use((request, response, next) => {
+    response.locals.requestId = randomUUID();
+    response.locals.logger = logger;
+    response.set('X-Request-Id', response.locals.requestId);
+    next();
+  });
+  app.use(cors({ origin: corsOrigins.length ? corsOrigins : isProduction ? false : true, methods: ['GET', 'POST'], maxAge: 86_400 }));
   app.use(express.json({ limit: '8kb', strict: true }));
 
   app.get('/health', (_request, response) => response.json({ status: 'ok', sandbox: 'isolated-vm' }));
@@ -130,24 +188,33 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       const baseCandidates = deriveCandidates(events, referenceDate);
       let enrichedCandidates = baseCandidates;
       let reasoningStatus = 'unavailable';
+      let reasoningError = null;
       try {
         const enrichment = await reasoningEnrichment({ candidates: baseCandidates, events });
         if (enrichment && enrichment.reasoningStatus === 'ok' && Array.isArray(enrichment.candidates)) {
           enrichedCandidates = enrichment.candidates;
           reasoningStatus = 'ok';
-          briefEnrichmentCache.set(merchant.id, { referenceDay: lagosDayKey(referenceDate), candidates: enrichedCandidates });
         } else {
-          briefEnrichmentCache.delete(merchant.id);
+          reasoningError = enrichment?.reasoningError ?? 'aiServiceUnavailable';
         }
       } catch (err) {
-        // defense-in-depth: ensure failures from enrichment don't break the brief
+        // Deterministic prioritization remains available when optional enrichment fails.
         reasoningStatus = 'unavailable';
-        briefEnrichmentCache.delete(merchant.id);
+        reasoningError = err instanceof AiFailure ? err.failureCode : 'aiInvalidResponse';
+      }
+      if (reasoningStatus !== 'ok') {
+        response.locals.logger?.error?.(JSON.stringify({
+          event: 'aria.reasoning_unavailable',
+          requestId: response.locals.requestId,
+          failureCode: reasoningError,
+          model: configuredOpenAIModel()
+        }));
       }
       const actions = prioritize(enrichedCandidates);
-      return response.json({ merchant, merchants: demoMerchants, simulatedAt: referenceDate.toISOString(), generatedAt: new Date().toISOString(), actions, prioritySummary: summarizePrioritization(events, referenceDate), ledger: createTrustLedger(events), reasoningStatus });
+      return response.json({ merchant, merchants: demoMerchants, simulatedAt: referenceDate.toISOString(), generatedAt: new Date().toISOString(), actions, prioritySummary: summarizePrioritization(events, referenceDate), ledger: createTrustLedger(events), reasoningStatus, ...(reasoningError ? { reasoningError } : {}) });
     } catch (error) {
-      return sendError(response, 404, error, locale, 'merchantNotFound');
+      const status = messageFor(error) === 'Merchant not found.' ? 404 : error instanceof AiFailure ? error.httpStatus : 500;
+      return sendError(response, status, error, locale, messageFor(error) === 'Merchant not found.' ? 'merchantNotFound' : 'serviceUnavailable', 'brief');
     }
   });
   app.post('/api/defense', defenseRateLimit, async (request, response) => {
@@ -155,32 +222,14 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
     try {
       if (typeof request.body?.insightId !== 'string') return sendError(response, 400, new Error('Choose a surfaced insight to re-check.'), locale, 'insightNotFound');
       const referenceDate = referenceDateFrom(clock);
-      const { merchant, events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
+      const { events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
       const defense = rederiveDefenseEvidence(events, request.body.insightId, referenceDate);
-      const providedReasoning = typeof request.body?.reasoning === 'string' ? request.body.reasoning : null;
-      const providedCrossSignals = Array.isArray(request.body?.crossSignals) ? request.body.crossSignals : null;
-      let cachedReasoning = null;
-      let cachedCrossSignals = null;
-      if (!providedReasoning) {
-        const cachedCandidate = cachedCandidateFor(briefEnrichmentCache, merchant.id, defense.insightId, referenceDate);
-        if (cachedCandidate) {
-          cachedReasoning = cachedCandidate.reasoning;
-          cachedCrossSignals = cachedCandidate.crossSignals;
-        }
-      }
-      if (providedReasoning || cachedReasoning) {
-        defense.evidence = {
-          ...defense.evidence,
-          enrichedReasoning: providedReasoning ?? cachedReasoning,
-          crossSignals: providedCrossSignals ?? cachedCrossSignals ?? []
-        };
-      }
       const narrative = await defenseNarrative({ ...defense, locale });
       return response.json({ insightId: defense.insightId, narrative, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
     } catch (error) {
       const message = messageFor(error);
-      const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : 503;
-      return sendError(response, status, error, locale);
+      const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : error instanceof AiFailure ? error.httpStatus : 503;
+      return sendError(response, status, error, locale, undefined, 'defense');
     }
   });
   app.post('/api/defense/stream', defenseRateLimit, async (request, response) => {
@@ -188,28 +237,12 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
     try {
       if (typeof request.body?.insightId !== 'string') return sendError(response, 400, new Error('Choose a surfaced insight to re-check.'), locale, 'insightNotFound');
       const referenceDate = referenceDateFrom(clock);
-      const { merchant, events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
+      const { events } = resolveMerchant(merchantData, request.body.merchantId, referenceDate);
       const defense = rederiveDefenseEvidence(events, request.body.insightId, referenceDate);
-      const providedReasoning = typeof request.body?.reasoning === 'string' ? request.body.reasoning : null;
-      const providedCrossSignals = Array.isArray(request.body?.crossSignals) ? request.body.crossSignals : null;
-      let cachedReasoning = null;
-      let cachedCrossSignals = null;
-      if (!providedReasoning) {
-        const cachedCandidate = cachedCandidateFor(briefEnrichmentCache, merchant.id, defense.insightId, referenceDate);
-        if (cachedCandidate) {
-          cachedReasoning = cachedCandidate.reasoning;
-          cachedCrossSignals = cachedCandidate.crossSignals;
-        }
-      }
-      if (providedReasoning || cachedReasoning) {
-        defense.evidence = {
-          ...defense.evidence,
-          enrichedReasoning: providedReasoning ?? cachedReasoning,
-          crossSignals: providedCrossSignals ?? cachedCrossSignals ?? []
-        };
-      }
       const controller = new AbortController();
       request.on('aborted', () => controller.abort());
+      const narrativeStream = defenseStream({ ...defense, locale, signal: controller.signal });
+      const firstChunk = await narrativeStream.next();
       response.status(200).set({
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
@@ -218,16 +251,18 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       });
       response.flushHeaders();
       sendEvent(response, 'meta', { insightId: defense.insightId, confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
-      for await (const delta of defenseStream({ ...defense, locale, signal: controller.signal })) sendEvent(response, 'delta', { delta });
+      if (!firstChunk.done) sendEvent(response, 'delta', { delta: firstChunk.value });
+      for await (const delta of narrativeStream) sendEvent(response, 'delta', { delta });
       sendEvent(response, 'done', { confidence: defense.confidence, recalculatedAt: defense.recalculatedAt });
       return response.end();
     } catch (error) {
       if (!response.headersSent) {
         const message = messageFor(error);
-        const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : 503;
-        return sendError(response, status, error, locale);
+        const status = message === 'Insight not found in the current signal set.' || message === 'Merchant not found.' ? 404 : error instanceof AiFailure ? error.httpStatus : 503;
+        return sendError(response, status, error, locale, undefined, 'defense_stream');
       }
-      sendEvent(response, 'error', errorPayload(error, locale));
+      logAiFailure(response, 'defense_stream', error);
+      sendEvent(response, 'error', errorPayload(error, locale, undefined, response.locals.requestId));
       return response.end();
     }
   });
@@ -242,13 +277,15 @@ export function createApp({ merchantData = createSyntheticMerchantData, clock = 
       return response.json({ result, generatedCode: code });
     } catch (error) {
       const message = messageFor(error);
-      const status = message.startsWith('Ask a business') || message.startsWith('ARIA cannot') || message.startsWith('ARIA only') ? 400 : message === 'Merchant not found.' ? 404 : 422;
-      return sendError(response, status, error, locale);
+      const isQuestionError = message.startsWith('Ask a business') || message.startsWith('ARIA cannot') || message.startsWith('ARIA only');
+      const status = isQuestionError ? 400 : message === 'Merchant not found.' ? 404 : error instanceof AiFailure ? error.httpStatus : 422;
+      const fallbackCode = isQuestionError || message === 'Merchant not found.' ? undefined : error instanceof AiFailure ? undefined : 'analysisFailed';
+      return sendError(response, status, error, locale, fallbackCode, 'analysis');
     }
   });
-  app.use((error, _request, response, _next) => {
-    if (error instanceof SyntaxError && 'body' in error) return sendError(response, 400, new Error('Send valid JSON.'), 'en', 'invalidJson');
-    return sendError(response, 500, new Error('ARIA could not complete that request.'), 'en');
+  app.use((error, request, response, _next) => {
+    if (error instanceof SyntaxError && 'body' in error) return sendError(response, 400, new Error('Send valid JSON.'), requestLocale(request), 'invalidJson');
+    return sendError(response, 500, new Error('ARIA could not complete that request.'), requestLocale(request), 'serviceUnavailable');
   });
   return app;
 }

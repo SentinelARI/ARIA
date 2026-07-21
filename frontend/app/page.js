@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage, formatLedgerDate, greetingFor, lagosDayKey, lagosHour, lagosWeekday, localeMeta, localeOptions, localizedAction, localizedLedgerEntry, normalizeLocale, speechLocale, translate, typeLabel } from './i18n.mjs';
+import { apiEndpoint, fetchWithTimeout, normalizedRequestError, readJsonResponse, resolveApiOrigin } from './api.mjs';
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+const apiUrl = resolveApiOrigin({ NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL, NODE_ENV: process.env.NODE_ENV });
 
 const fallbackMerchants = [
   { id: 'aisha-textiles', name: 'Aisha', business: 'Aisha Textiles', location: 'Yaba, Lagos', sector: 'Fabric retail' },
@@ -50,6 +51,10 @@ const fallbackActions = [
 
 const fallbackSummary = { signalsRead: 0, opportunitiesEvaluated: 0, actionsSurfaced: 3, opportunitiesDiscarded: 0 };
 
+function responseError(payload) {
+  return { code: payload?.errorCode ?? 'requestFailed', message: payload?.error };
+}
+
 function Icon({ name, size = 20 }) {
   const paths = {
     spark: <path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2Z" />,
@@ -68,10 +73,6 @@ function Icon({ name, size = 20 }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function responseError(payload) {
-  return { code: payload?.errorCode ?? 'requestFailed', message: payload?.error };
-}
-
 function parseSseMessage(message) {
   const lines = message.split('\n');
   const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? 'message';
@@ -79,22 +80,29 @@ function parseSseMessage(message) {
   return { event, payload: JSON.parse(data) };
 }
 
-async function consumeSse(response, onEvent) {
+async function consumeSse(response, onEvent, signal) {
   if (!response.body) throw Object.assign(new Error('ARIA could not open the live reasoning stream.'), { code: 'requestFailed' });
   const reader = response.body.getReader();
+  const cancelReader = () => { void reader.cancel(); };
+  signal?.addEventListener('abort', cancelReader, { once: true });
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replaceAll('\r\n', '\n');
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary >= 0) {
-      const message = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      if (message.trim()) onEvent(parseSseMessage(message));
-      boundary = buffer.indexOf('\n\n');
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replaceAll('\r\n', '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const message = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        if (message.trim()) onEvent(parseSseMessage(message));
+        boundary = buffer.indexOf('\n\n');
+      }
+      if (done) return;
     }
-    if (done) return;
+  } finally {
+    signal?.removeEventListener('abort', cancelReader);
+    reader.releaseLock();
   }
 }
 
@@ -181,6 +189,7 @@ export default function Home() {
   const [referenceAt, setReferenceAt] = useState(null);
   const [briefLoading, setBriefLoading] = useState(true);
   const [briefError, setBriefError] = useState(null);
+  const [reasoning, setReasoning] = useState({ status: 'unavailable', errorCode: null });
   const [expandedId, setExpandedId] = useState(null);
   const [defenses, setDefenses] = useState({});
   const [defenseLoading, setDefenseLoading] = useState(null);
@@ -221,13 +230,12 @@ export default function Home() {
     const controller = new AbortController();
     setBriefLoading(true);
     setBriefError(null);
+    setReasoning({ status: 'loading', errorCode: null });
     setActiveAgent('Ingestion');
-    fetch(`${apiUrl}/api/brief?merchant=${encodeURIComponent(merchantId)}`, { signal: controller.signal })
-      .then(async (response) => {
-        if (response.ok) return response.json();
-        const apiError = responseError(await response.json());
-        throw Object.assign(new Error(apiError.message), { code: apiError.code });
-      })
+    (async () => {
+      const response = await fetchWithTimeout(apiEndpoint(apiUrl, `/api/brief?merchant=${encodeURIComponent(merchantId)}`), { signal: controller.signal });
+      return readJsonResponse(response);
+    })()
       .then((brief) => {
         setActions(brief.actions);
         setMerchant(brief.merchant);
@@ -235,11 +243,14 @@ export default function Home() {
         setSummary(brief.prioritySummary);
         setLedger(brief.ledger);
         setReferenceAt({ value: brief.simulatedAt ?? new Date().toISOString(), receivedAt: Date.now() });
+        setReasoning({ status: brief.reasoningStatus ?? 'unavailable', errorCode: brief.reasoningError ?? null });
         setActiveAgent('Priority');
       })
       .catch((error) => {
         if (error.name !== 'AbortError') {
-          setBriefError({ code: 'liveData', message: error.message });
+          const normalized = normalizedRequestError(error);
+          setBriefError({ code: normalized.code === 'apiNotConfigured' ? normalized.code : 'liveData', message: normalized.message });
+          setReasoning({ status: 'unavailable', errorCode: normalized.code });
           setReferenceAt({ value: new Date().toISOString(), receivedAt: Date.now() });
           setActiveAgent('Priority');
         }
@@ -281,16 +292,20 @@ export default function Home() {
     setDefenseLoading(action.id);
     setDefenses({ [action.id]: { narrative: '', confidence: action.confidence } });
     setActiveAgent('Defense');
+    let streamTimedOut = false;
+    const streamTimeout = window.setTimeout(() => {
+      streamTimedOut = true;
+      controller.abort();
+    }, 55_000);
     try {
-      const response = await fetch(`${apiUrl}/api/defense/stream`, {
+      const response = await fetchWithTimeout(apiEndpoint(apiUrl, '/api/defense/stream'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ merchantId, insightId: action.id, locale }),
         signal: controller.signal
       });
       if (!response.ok) {
-        const apiError = responseError(await response.json());
-        throw Object.assign(new Error(apiError.message), { code: apiError.code });
+        await readJsonResponse(response);
       }
       await consumeSse(response, ({ event, payload }) => {
         if (event === 'meta' || event === 'done') {
@@ -304,11 +319,15 @@ export default function Home() {
           const apiError = responseError(payload);
           throw Object.assign(new Error(apiError.message), { code: apiError.code });
         }
-      });
+      }, controller.signal);
     } catch (error) {
-      if (error.name === 'AbortError') return;
-      setDefenses({ [action.id]: { narrative: errorMessage(locale, { code: error.code, message: error.message }), confidence: action.confidence, error: true } });
+      if (error.name === 'AbortError' && !streamTimedOut) return;
+      const normalized = streamTimedOut
+        ? Object.assign(new Error('ARIA took too long to respond.'), { code: 'requestTimedOut' })
+        : normalizedRequestError(error);
+      setDefenses({ [action.id]: { narrative: errorMessage(locale, { code: normalized.code, message: normalized.message }), confidence: action.confidence, error: true } });
     } finally {
+      window.clearTimeout(streamTimeout);
       if (defenseController.current === controller) {
         defenseController.current = null;
         setDefenseLoading(null);
@@ -326,15 +345,12 @@ export default function Home() {
     setAnalysis(null);
     setActiveAgent('Analysis');
     try {
-      const response = await fetch(`${apiUrl}/api/analysis`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merchantId, question, locale }) });
-      const payload = await response.json();
-      if (!response.ok) {
-        const apiError = responseError(payload);
-        throw Object.assign(new Error(apiError.message), { code: apiError.code });
-      }
+      const response = await fetchWithTimeout(apiEndpoint(apiUrl, '/api/analysis'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merchantId, question, locale }) });
+      const payload = await readJsonResponse(response);
       setAnalysis({ question, result: payload.result, generatedCode: payload.generatedCode });
     } catch (error) {
-      setAnalysis({ question, error: { code: error.code, message: error.message } });
+      const normalized = normalizedRequestError(error);
+      setAnalysis({ question, error: { code: normalized.code, message: normalized.message } });
     } finally {
       setAnalysisLoading(false);
     }
@@ -385,6 +401,7 @@ export default function Home() {
     <section className="hero textile-motif">
       <nav className="nav" aria-label={translate(locale, 'nav.controls')}><div className="brand"><span className="brand-mark"><Icon name="spark" size={18} /></span><span>ARIA</span></div><div className="nav-controls"><span className="live"><i /> {translate(locale, dataStatus)}</span><div className="language-switcher" role="group" aria-label={translate(locale, 'nav.language')}>{localeOptions.map((option) => <button key={option.code} type="button" className={option.code === locale ? 'selected' : ''} onClick={() => setLocale(option.code)} aria-pressed={option.code === locale} aria-label={translate(locale, 'nav.languageOption', { language: option.name })}>{option.label}</button>)}</div><button className="icon-button" onClick={() => setTheme((value) => value === 'light' ? 'dark' : 'light')} aria-label={translate(locale, 'nav.theme', { theme: translate(locale, `theme.${theme === 'light' ? 'dark' : 'light'}`) })}><Icon name={theme === 'light' ? 'moon' : 'sun'} size={18} /></button></div></nav>
       {briefError && <p className="live-data-warning" role="alert">{errorMessage(locale, briefError)}</p>}
+      {!briefLoading && !briefError && reasoning.status !== 'ok' && <p className="live-data-warning" role="status">{translate(locale, 'reasoning.degraded')} {reasoning.errorCode && errorMessage(locale, { code: reasoning.errorCode })}</p>}
       <div className="hero-copy"><p className="eyebrow">{currentWeekday} · {merchant.location?.toUpperCase()}</p><h1>{copy.greeting}<br /><em>{copy.subhead}</em></h1><p>{translate(locale, 'hero.description', { business: merchant.business })}</p></div>
       <div className="merchant-switcher" role="group" aria-label={translate(locale, 'merchant.choose')}><span><Icon name="building" size={16} /> {translate(locale, 'merchant.demo')}</span>{merchants.map((option) => <button key={option.id} type="button" className={option.id === merchantId ? 'selected' : ''} onClick={() => selectMerchant(option.id)} aria-pressed={option.id === merchantId}>{option.business}</button>)}</div>
       <div className="signal-strip" aria-busy={briefLoading}><span><Icon name="shield" size={17} /> {translate(locale, 'signals.actions', { count: summary.actionsSurfaced })}</span><span>{translate(locale, 'signals.read', { count: summary.signalsRead })} · <strong aria-label={translate(locale, 'signals.discarded', { count: summary.opportunitiesDiscarded })}>{animatedDiscardCount}</strong> {translate(locale, 'signals.discardedSuffix', { count: summary.opportunitiesDiscarded })}</span><button onClick={speakBrief}><Icon name="volume" size={17} /> {translate(locale, 'signals.listen')}</button></div>
