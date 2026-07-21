@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage, formatLedgerDate, greetingFor, lagosDayKey, lagosHour, lagosWeekday, localeMeta, localeOptions, localizedAction, localizedLedgerEntry, normalizeLocale, speechLocale, translate, typeLabel } from './i18n.mjs';
 import { analysisResultFromPayload, apiEndpoint, fetchWithTimeout, normalizedRequestError, readJsonResponse, resolveApiOrigin, shouldRetryReasoningError } from './api.mjs';
+import { presentAnalysisResult } from './analysisPresentation.mjs';
 
 const apiUrl = resolveApiOrigin({ NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL, NODE_ENV: process.env.NODE_ENV });
 
@@ -179,22 +180,39 @@ function AgentFlow({ active, locale }) {
   return <section className="control-room textile-motif" aria-labelledby="control-title"><div><p className="eyebrow">{translate(locale, 'agent.eyebrow')}</p><h2 id="control-title">{translate(locale, 'agent.title')}</h2><p>{translate(locale, 'agent.description')}</p></div><ol className="agent-flow">{agents.map(([id, icon], index) => <li key={id} className={active === id ? 'active' : ''}><div className="agent-flow-top"><span>{String(index + 1).padStart(2, '0')}</span><Icon name={icon} size={18} /></div><div><strong>{translate(locale, `agent.${id.toLowerCase()}.label`)}</strong><small>{translate(locale, `agent.${id.toLowerCase()}.blurb`)}</small></div></li>)}</ol></section>;
 }
 
-function formatAnalysisResult(result) {
-  return JSON.stringify(result, null, 2) ?? 'null';
-}
-
 function AnalysisResult({ analysis, locale }) {
   if (!analysis || analysis.error) return null;
-  return <div className="analysis-result" aria-live="polite">
+  const presentation = presentAnalysisResult(analysis.result, locale);
+  return <section className="analysis-result" aria-labelledby="analysis-result-title">
     <div className="result-heading">
-      <span><Icon name="terminal" size={17} /> {translate(locale, 'analysis.resultHeading')}</span>
+      <h3 id="analysis-result-title"><Icon name="terminal" size={17} /> {translate(locale, 'analysis.resultHeading')}</h3>
       <span>{translate(locale, 'analysis.boundary')}</span>
     </div>
     <div className="result-output">
-      <strong>{translate(locale, 'analysis.result')}</strong>
-      <pre className="analysis-output">{formatAnalysisResult(analysis.result)}</pre>
+      <p className="analysis-summary" role="status">{presentation.summary}</p>
+      <div className="analysis-groups">
+        {presentation.groups.map((group, groupIndex) => <section className="analysis-group" key={`${group.title}-${groupIndex}`}>
+          <h4>{group.title}</h4>
+          <div className="analysis-cards">
+            {group.items.map((item, itemIndex) => <article className="analysis-card" key={`${item.title}-${itemIndex}`}>
+              <p className="analysis-card-title">{item.title}</p>
+              <dl className="analysis-fields">
+                {item.fields.map((field, fieldIndex) => <div key={`${field.label}-${fieldIndex}`}>
+                  <dt>{field.label}</dt>
+                  <dd>{field.value}</dd>
+                </div>)}
+              </dl>
+            </article>)}
+          </div>
+          {group.remainingCount > 0 && <p className="analysis-more">{group.remainingLabel}</p>}
+        </section>)}
+      </div>
+      <details className="analysis-details">
+        <summary>{translate(locale, 'analysis.structuredDetails')}</summary>
+        <pre className="analysis-output">{presentation.rawResult}</pre>
+      </details>
     </div>
-  </div>;
+  </section>;
 }
 
 export default function Home() {
